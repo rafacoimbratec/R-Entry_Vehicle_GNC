@@ -8,7 +8,7 @@ Mars_mu = 4.27985580e13; % [m^3/s^2]
 H_s = 8.8e3; % [m] - Scale height
 rho_0 = 0.0168; % [kg/m^3] - Reference density
 
-specific_heat = 1.29; % - Specific heat ratio
+specific_heat = 1.29; % [-] - Specific heat ratio
 
 R_star = 8314.32; % [J/(kmol*K)] - Universal gas constant
 M_CO2 = 44.01; % [kg/kmol] - CO2 molecular mass
@@ -17,16 +17,16 @@ R_s = R_star/M_CO2; % [J/(kg*K)] - Specific gas constant
 
 % Simulation
 startTime = 0.0; % [s]
-stopTime = 10.0; % [s]
+stopTime = 400.0; % [s]
 
 stepTime = 0.01; % [s]
 
 %% Initial Conditions
 
 % Translation State
-V_0 = 11e3; % [m/s] - Ground speed
+V_0 = 11e3/10; % [m/s] - Ground speed
 gamma_0 = deg2rad(-9.536); % [rad] - Flight-path angle
-chi_0 = deg2rad(0); % [rad] - Heading
+chi_0 = deg2rad(90); % [rad] - Heading
 
 R_0 = 220e3 + Mars_radius; % [m] - Position radius
 tau_0 = deg2rad(0); % [rad] - Longitude
