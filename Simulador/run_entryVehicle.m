@@ -17,14 +17,14 @@ R_s = R_star/M_CO2; % [J/(kg*K)] - Specific gas constant
 
 % Simulation
 startTime = 0.0; % [s]
-stopTime = 400.0; % [s]
+stopTime = 3000.0; % [s]
 
 stepTime = 0.01; % [s]
 
 %% Initial Conditions
 
 % Translation State
-V_0 = 11e3/10; % [m/s] - Ground speed
+V_0 = 11e3/2; % [m/s] - Ground speed
 gamma_0 = deg2rad(-9.536); % [rad] - Flight-path angle
 chi_0 = deg2rad(90); % [rad] - Heading
 
