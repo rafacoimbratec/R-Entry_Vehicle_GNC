@@ -22,9 +22,9 @@ R_s = R_star/M_CO2; % [J/(kg*K)] - Specific gas constant
 
 % Simulation
 startTime = 0.0; % [s]
-stopTime = 3000.0; % [s]
+stopTime = 200.0; % [s]
 
-stepTime = 0.001; % [s]
+stepTime = 0.0001; % [s]
 
 %% Initial Conditions
 
@@ -43,7 +43,7 @@ q_0 = deg2rad(0); % [rad/s] - Pitch rate
 r_0 = deg2rad(0); % [rad/s] - Yaw rate
 
 alpha_0 = deg2rad(-24.5); % [rad] - Angle of attack
-beta_0 = deg2rad(0); % [rad] - Angle of sideslip
+beta_0 = deg2rad(0.05); % [rad] - Angle of sideslip
 sigma_0 = deg2rad(180); % [rad] - Bank angle
 
 % Initial mass
