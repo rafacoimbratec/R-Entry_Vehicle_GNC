@@ -1,4 +1,9 @@
 
+% Load Aerodynamic Data
+load("ApolloDragCoeff.mat");
+load("ApolloLiftCoeff.mat");
+load("ApolloPitchMomentCoeff.mat");
+load("ApolloPitchDampingCoeff.mat");
 
 % Constants
 Mars_radius = 3389.5e3; % [m]
@@ -19,16 +24,16 @@ R_s = R_star/M_CO2; % [J/(kg*K)] - Specific gas constant
 startTime = 0.0; % [s]
 stopTime = 3000.0; % [s]
 
-stepTime = 0.01; % [s]
+stepTime = 0.001; % [s]
 
 %% Initial Conditions
 
 % Translation State
-V_0 = 11e3/2; % [m/s] - Ground speed
+V_0 = 11e3; % [m/s] - Ground speed
 gamma_0 = deg2rad(-9.536); % [rad] - Flight-path angle
 chi_0 = deg2rad(90); % [rad] - Heading
 
-R_0 = 220e3 + Mars_radius; % [m] - Position radius
+R_0 = 70e3 + Mars_radius; % [m] - Position radius
 tau_0 = deg2rad(0); % [rad] - Longitude
 lambda_0 = deg2rad(0); % [rad] - Latitude
 
@@ -37,9 +42,9 @@ p_0 = deg2rad(0); % [rad/s] - Roll rate
 q_0 = deg2rad(0); % [rad/s] - Pitch rate
 r_0 = deg2rad(0); % [rad/s] - Yaw rate
 
-alpha_0 = deg2rad(0); % [rad] - Angle of attack
+alpha_0 = deg2rad(-24.5); % [rad] - Angle of attack
 beta_0 = deg2rad(0); % [rad] - Angle of sideslip
-sigma_0 = deg2rad(0); % [rad] - Bank angle
+sigma_0 = deg2rad(180); % [rad] - Bank angle
 
 % Initial mass
 m_0 = 4976; % [kg]
