@@ -14,7 +14,7 @@ Mars_mu = 3.98319648e14;
 % Mars atmosphere
 %H_s = 8.8e3; % [m] - Scale height
 %rho_0 = 0.0168; % [kg/m^3] - Reference density
-H_s = 7200;
+H_s = 7050;
 rho_0 = 1.225;
 
 specific_heat = 1.29; % [-] - Specific heat ratio
@@ -46,9 +46,9 @@ p_0 = deg2rad(0); % [rad/s] - Roll rate
 q_0 = deg2rad(0); % [rad/s] - Pitch rate
 r_0 = deg2rad(0); % [rad/s] - Yaw rate
 
-alpha_0 = deg2rad(0); % [rad] - Angle of attack
+alpha_0 = deg2rad(-23.); % [rad] - Angle of attack
 beta_0 = deg2rad(0.); % [rad] - Angle of sideslip
-sigma_0 = deg2rad(0); % [rad] - Bank angle
+sigma_0 = deg2rad(0.); % [rad] - Bank angle
 
 % Initial mass
 m_0 = 4976; % [kg]
