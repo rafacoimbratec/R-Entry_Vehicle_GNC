@@ -75,3 +75,4 @@ d_ref = 3.9; % [m^2] - Vehicle diameter
 
 % Center of Mass location (with respect to apex reference frame)
 r_cm = [2.57; 0; -0.137];
+r_cm = [1.57; 0; -0.137];
