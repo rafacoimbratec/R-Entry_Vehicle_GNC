@@ -47,8 +47,8 @@ q_0 = deg2rad(0); % [rad/s] - Pitch rate
 r_0 = deg2rad(0); % [rad/s] - Yaw rate
 
 alpha_0 = deg2rad(-23.); % [rad] - Angle of attack
-beta_0 = deg2rad(0.); % [rad] - Angle of sideslip
-sigma_0 = deg2rad(0.); % [rad] - Bank angle
+beta_0 = deg2rad(0.05); % [rad] - Angle of sideslip
+sigma_0 = deg2rad(110.); % [rad] - Bank angle
 
 % Initial mass
 m_0 = 4976; % [kg]
