@@ -17,7 +17,7 @@ Mars_mu = 3.98319648e14;
 H_s = 7050;
 rho_0 = 1.225;
 
-specific_heat = 1.29; % [-] - Specific heat ratio
+specific_heat = 1.33; % [-] - Specific heat ratio
 
 R_star = 8314.32; % [J/(kmol*K)] - Universal gas constant
 M_CO2 = 44.01; % [kg/kmol] - CO2 molecular mass
