@@ -64,7 +64,6 @@ I_yz = 0; % [kg/m^2]
 I_xz = 1752.00; % [kg/m^2]
 I_xz = 0;
 
-
 %% Vehicle Properties
 
 % Reference Area
