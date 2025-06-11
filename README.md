@@ -1,7 +1,7 @@
 # 🚿 Guidance, Navigation and Control System for a Planetary Entry Vehicle
 
 This project focuses on the simulation and design of a Guidance, Navigation, and Control (GNC) system tailored for atmospheric reentry vehicles targeting Mars missions. The project is inspired by classical and modern approaches to entry guidance, particularly leveraging Apollo-derived guidance schemes and enhancements developed for the Mars Science Laboratory (MSL) and Mars 2020 missions.
-This projet was developed under the course Guidance Navigation and Control from Instituto Superior Técnico.
+This projet was developed under the course Guidance Navigation and Control from Instituto Superior Técnico - Potential Thesis development by the Author
 
 ## 🔧 Features
 
@@ -46,7 +46,7 @@ This projet was developed under the course Guidance Navigation and Control from 
 ![Mars Entry Vehicle](Notes/Visual_Overview_fig.png)
 
 
-## 👨‍💻 Author
+## 👨‍💻 Authors
 
 Rafael Azeiteiro  [@rafacoimbratec]  
 
@@ -57,6 +57,7 @@ Eduadro Helena [@Dudax12123]
 Guilherme Martins [@github]
 
 Rodrigo Pereira [@rodmpereira14]
+
 ---
 
 📘 Literature:
