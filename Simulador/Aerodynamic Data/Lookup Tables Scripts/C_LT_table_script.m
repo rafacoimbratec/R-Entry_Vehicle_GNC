@@ -1,0 +1,36 @@
+% Create Apollo lift coefficient lookup table data for Simulink
+% Based on Table B.2 from NAA 1965
+
+% Mach numbers (first column in the table)
+Mach_numbers_CL = [0.90; 1.10; 1.20; 1.35; 1.65; 2.00; 2.40; 3.00; 4.00; 6.00; 10.00];
+
+% Angles of attack (first row in the table)
+alpha_T_CL = [0, 5, 10, 15, 20, 25, 30, 35, 40];
+
+% Lift coefficient data (CL_T)
+CL_T = [...
+    0.0, 0.098, 0.178, 0.250, 0.321, 0.383, 0.440, 0.488, 0.528;...
+    0.0, 0.099, 0.200, 0.295, 0.381, 0.471, 0.553, 0.615, 0.630;...
+    0.0, 0.127, 0.225, 0.319, 0.403, 0.486, 0.558, 0.611, 0.615;...
+    0.0, 0.119, 0.228, 0.325, 0.424, 0.517, 0.597, 0.610, 0.600;...
+    0.0, 0.115, 0.235, 0.345, 0.437, 0.518, 0.570, 0.583, 0.568;...
+    0.0, 0.130, 0.241, 0.342, 0.438, 0.508, 0.540, 0.557, 0.548;...
+    0.0, 0.118, 0.220, 0.336, 0.425, 0.485, 0.525, 0.540, 0.533;...
+    0.0, 0.123, 0.221, 0.333, 0.415, 0.482, 0.530, 0.540, 0.530;...
+    0.0, 0.110, 0.218, 0.320, 0.405, 0.480, 0.527, 0.540, 0.531;...
+    0.0, 0.118, 0.220, 0.312, 0.400, 0.480, 0.525, 0.540, 0.530;...
+    0.0, 0.122, 0.228, 0.318, 0.405, 0.480, 0.526, 0.540, 0.529];
+
+% Save the data to a .mat file
+save('ApolloLiftCoeff.mat', 'Mach_numbers_CL', 'alpha_T_CL', 'CL_T');
+
+% Display confirmation
+disp('Apollo lift coefficient data saved to ApolloLiftCoeff.mat');
+disp('To use in Simulink:');
+disp('1. Load the .mat file in your model workspace');
+disp('2. Use a 2D Lookup Table block');
+disp('3. Set the Row index to "Mach_numbers"');
+disp('4. Set the Column index to "alpha_T"');
+disp('5. Set the Table data to "CL_T"');
+disp(' ');
+disp('Note: Connect Mach number to u1 (top input) and angle of attack to u2 (bottom input)');
