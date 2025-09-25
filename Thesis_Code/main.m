@@ -59,7 +59,7 @@ L_over_D = 0.54;   % Lift-to-drag ratio, dimensionless
 beta      = 379;   % Ballistic coefficient [kg/m^2]
 
 %% Path Constraints and Requirements
-A_max  = 4 * 9.80665;  % Maximum allowable acceleration [m/s^2] (4g)
+A_max  = 4;  % Maximum allowable acceleration [m/s^2] (4g)
 q_max  = 13e3;         % Maximum allowable dynamic pressure [Pa] (13 kPa)
 Qdot_max = 500e3;      % Maximum allowable heat rate [W/m^2] (500 kW/m^2)
 
