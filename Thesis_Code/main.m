@@ -1,5 +1,5 @@
 %% Planet Constants - Mars
-
+clear; clc; close all;
 % === Mars Radius ===
 Mars_radius = 3396.2e3;  % [m]
 
@@ -51,6 +51,7 @@ phi_t   = (0.276)*deg2rad;    % Target latitude [deg]
 V_t     = 450;      % Final velocity [m/s]
 h_t     = 2480;     % Final altitude [m]
 rt = (h_t+Mars_radius);
+e_t = Mars_mu / rt - 0.5 * V_t^2;
 %% Targeting Accuracy Requirement
 Rgo_target = 5e3;  % Maximum allowable targeting error [m] (5 km)
 
@@ -77,3 +78,14 @@ lon_t  = -175.8 * deg2rad;
 
 % Range-to-go is simply great-circle distance to target (d)
 fprintf('Initial Range-to-Go: %.2f km\n', Rgo/1000);
+
+%% Initial Bank Angle Guess and Final Bank Angle
+sigma0_guess_deg = 100;        % Initial guess for bank angle [deg]
+sigma_f_deg      = 40;          % Final bank angle at target [deg]
+
+% Convert to radians for MATLAB/Simulink
+sigma0_guess = sigma0_guess_deg * deg2rad;
+sigma_f      = sigma_f_deg * deg2rad;
+
+fprintf('Initial Bank Guess: %.2f deg, Final Bank: %.2f deg\n', ...
+    sigma0_guess_deg, sigma_f_deg);
