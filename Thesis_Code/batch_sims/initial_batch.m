@@ -110,4 +110,92 @@ legend('Qdot','Qdot_{max}','Location','best');
 
 sgtitle('Mars Entry Path Constraints');
 
+%% === FIGURE 3: Trajectory Geometry and Metrics ===
+figure('Name','Trajectory and Spherical Metrics','Color','w');
+
+% --- Compute spherical metrics ---
+lat  = phi*deg2rad;    % latitude [rad]
+lon  = theta*deg2rad;  % longitude [rad]
+
+N = length(t);
+
+d      = zeros(N,1);
+sin_d  = zeros(N,1);
+cos_d  = zeros(N,1);
+RC     = zeros(N,1);
+RD     = zeros(N,1);
+RD_go  = zeros(N,1);
+Rgo    = zeros(N,1);
+
+for k = 1:N
+    [d(k), sin_d(k), cos_d(k), RC(k), RD(k), RD_go(k), Rgo(k)] = ...
+        spherical_metrics(phi0, theta0, lat(k), lon(k), phi_t, theta_t, Mars_radius);
+end
+
+% --- Plot sigma vs time ---
+subplot(3,3,1)
+plot(t, sigma,'b','LineWidth',1.2); hold on;
+plot(t(end), sigma(end),'ro','MarkerFaceColor','r');
+grid on;
+xlabel('Time [s]'); ylabel('\sigma [deg]');
+title('Bank Angle vs Time');
+text(t(end), sigma(end), sprintf('  (%.1f, %.1f°)', t(end), sigma(end)));
+
+% --- Altitude vs Velocity ---
+subplot(3,3,2)
+plot(V/1e3, altitude,'b','LineWidth',1.2); hold on;
+plot(V(end)/1e3, altitude(end),'ro','MarkerFaceColor','r');
+grid on;
+xlabel('Velocity [km/s]'); ylabel('Altitude [km]');
+title('Altitude vs Velocity');
+text(V(end)/1e3, altitude(end), sprintf('  (%.2f, %.1f)', V(end)/1e3, altitude(end)));
+
+% --- Flight Path Angle vs Time ---
+subplot(3,3,3)
+plot(t, gamma,'b','LineWidth',1.2); hold on;
+plot(t(end), gamma(end),'ro','MarkerFaceColor','r');
+grid on;
+xlabel('Time [s]'); ylabel('\gamma [deg]');
+title('Flight Path Angle vs Time');
+text(t(end), gamma(end), sprintf('  (%.1f, %.2f°)', t(end), gamma(end)));
+
+% --- Latitude vs Longitude ---
+subplot(3,3,4)
+plot(theta, phi,'b','LineWidth',1.2); hold on;
+plot(theta(end), phi(end),'ro','MarkerFaceColor','r');
+grid on;
+xlabel('Longitude [deg]'); ylabel('Latitude [deg]');
+title('Ground Track (\phi vs \theta)');
+text(theta(end), phi(end), sprintf('  (%.2f, %.2f)', theta(end), phi(end)));
+
+% --- RD_go vs time ---
+subplot(3,3,5)
+plot(t, RD_go/1e3,'b','LineWidth',1.2); hold on;
+plot(t(end), RD_go(end)/1e3,'ro','MarkerFaceColor','r');
+grid on;
+xlabel('Time [s]'); ylabel('RD_{go} [km]');
+title('Remaining Downrange vs Time');
+text(t(end), RD_go(end)/1e3, sprintf('  (%.1f, %.1f)', t(end), RD_go(end)/1e3));
+
+% --- RC vs time ---
+subplot(3,3,6)
+plot(t, RC/1e3,'b','LineWidth',1.2); hold on;
+plot(t(end), RC(end)/1e3,'ro','MarkerFaceColor','r');
+grid on;
+xlabel('Time [s]'); ylabel('RC [km]');
+title('Crossrange vs Time');
+text(t(end), RC(end)/1e3, sprintf('  (%.1f, %.1f)', t(end), RC(end)/1e3));
+
+% --- Rgo vs time ---
+subplot(3,3,7)
+plot(t, Rgo/1e3,'b','LineWidth',1.2); hold on;
+plot(t(end), Rgo(end)/1e3,'ro','MarkerFaceColor','r');
+grid on;
+xlabel('Time [s]'); ylabel('R_{go} [km]');
+title('Total Range-to-go vs Time');
+text(t(end), Rgo(end)/1e3, sprintf('  (%.1f, %.1f)', t(end), Rgo(end)/1e3));
+
+sgtitle('Mars Entry Trajectory and Range Metrics');
+
+
 
