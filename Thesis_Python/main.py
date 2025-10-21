@@ -9,6 +9,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import Tuple, List
+from spherical_metrics import spherical_metrics
 
 
 @dataclass
@@ -193,12 +194,12 @@ class ReentryDynamics:
         gamma_dot = (L * np.cos(sigma) / V) + (V / r - g / V) * np.cos(gamma) + \
                     2 * self.mars.omega * np.cos(phi) * np.sin(psi) + \
                     (self.mars.omega**2 * r / V) * np.cos(phi) * \
-                    (np.cos(gamma) * np.cos(phi) + np.sin(gamma) * np.sin(phi) * np.sin(psi))
+                    (np.cos(gamma) * np.cos(phi) + np.sin(gamma) * np.sin(phi) * np.cos(psi))
         
         psi_dot = (L * np.sin(sigma)) / (V * np.cos(gamma)) + \
                   (V_h / r) * np.sin(psi) * np.tan(phi) - \
                   2 * self.mars.omega * (np.tan(gamma) * np.cos(phi) * np.cos(psi) - np.sin(phi)) + \
-                  (self.mars.omega**2 * r / (V * np.cos(gamma))) * np.sin(phi) * np.cos(phi) * np.cos(psi)
+                  (self.mars.omega**2 * r / (V * np.cos(gamma))) * np.sin(phi) * np.cos(phi) * np.sin(psi)
         
         return np.array([r_dot, theta_dot, phi_dot, V_dot, gamma_dot, psi_dot])
     
@@ -240,11 +241,12 @@ class ReentryDynamics:
         L = self.vehicle.L_over_D * D
         
         # Total acceleration
-        g = self.mars.mu / state.r**2
-        A_total = np.sqrt(D**2 + L**2 + g**2)
+        g0 = 9.80665  # Standard gravity [m/s^2]
+        g = (self.mars.mu / state.r**2)
+        A_total = np.sqrt(D**2 + L**2)/g0
         
         # Heat flux (Sutton-Graves correlation)
-        Q_dot = self.vehicle.k_heat_flux * np.sqrt(rho) * state.V**self.vehicle.M
+        Q_dot = self.vehicle.k_heat_flux * (rho**self.vehicle.N) * state.V**self.vehicle.M
         
         return {
             'q': q,
@@ -304,12 +306,14 @@ class ReentrySimulation:
             'V': np.zeros(n_steps),
             'gamma': np.zeros(n_steps),
             'psi': np.zeros(n_steps),
+            'sigma': np.zeros(n_steps),
             'q': np.zeros(n_steps),
             'A': np.zeros(n_steps),
             'Q_dot': np.zeros(n_steps),
             'rho': np.zeros(n_steps),
             'D': np.zeros(n_steps),
             'L': np.zeros(n_steps),
+            'Mach': np.zeros(n_steps),
         }
         
         # Progress tracking
@@ -329,6 +333,7 @@ class ReentrySimulation:
             results['V'][i] = state.V
             results['gamma'][i] = state.gamma
             results['psi'][i] = state.psi
+            results['sigma'][i] = bank_angle
             
             # Calculate aerodynamic quantities
             aero = self.dynamics.calculate_aerodynamic_quantities(state)
@@ -339,8 +344,15 @@ class ReentrySimulation:
             results['D'][i] = aero['D']
             results['L'][i] = aero['L']
             
+            # Calculate Mach number
+            T = self.atmosphere.temperature(state.h)
+            gamma_gas = self.mars.specific_heat_ratio
+            R_s = self.mars.R_s
+            a = np.sqrt(gamma_gas * R_s * T)  # Speed of sound [m/s]
+            results['Mach'][i] = state.V / a
+            
             # Check termination conditions
-            if state.h < self.target.h or state.h < 0:
+            if state.h < 0:
                 # Trim arrays to actual simulation length
                 for key in results:
                     results[key] = results[key][:i+1]
@@ -353,80 +365,176 @@ class ReentrySimulation:
         return results
     
     def plot_results(self, results: dict):
-        """Plot simulation results"""
-        fig, axes = plt.subplots(3, 3, figsize=(15, 12))
-        fig.suptitle('Mars Reentry Vehicle Simulation Results', fontsize=16)
+        """Plot simulation results in two separate figures: states and constraints"""
+        # Figure 1: States
+        fig_states, axes1 = plt.subplots(4, 2, figsize=(16, 12))
+        fig_states.suptitle('Mars Reentry Vehicle - States', fontsize=16)
+
+        # Get final point index
+        idx_final = -1
         
-        # Altitude
-        axes[0, 0].plot(results['t'], results['h']/1e3)
-        axes[0, 0].set_xlabel('Time [s]')
-        axes[0, 0].set_ylabel('Altitude [km]')
-        axes[0, 0].grid(True)
-        axes[0, 0].axhline(y=self.target.h/1e3, color='r', linestyle='--', label='Target')
-        axes[0, 0].legend()
-        
-        # Velocity
-        axes[0, 1].plot(results['t'], results['V'])
-        axes[0, 1].set_xlabel('Time [s]')
-        axes[0, 1].set_ylabel('Velocity [m/s]')
-        axes[0, 1].grid(True)
-        axes[0, 1].axhline(y=self.target.V, color='r', linestyle='--', label='Target')
-        axes[0, 1].legend()
-        
-        # Flight path angle
-        axes[0, 2].plot(results['t'], np.rad2deg(results['gamma']))
-        axes[0, 2].set_xlabel('Time [s]')
-        axes[0, 2].set_ylabel('Flight Path Angle [deg]')
-        axes[0, 2].grid(True)
-        
-        # Latitude
-        axes[1, 0].plot(results['t'], np.rad2deg(results['phi']))
-        axes[1, 0].set_xlabel('Time [s]')
-        axes[1, 0].set_ylabel('Latitude [deg]')
-        axes[1, 0].grid(True)
-        axes[1, 0].axhline(y=np.rad2deg(self.target.phi), color='r', linestyle='--', label='Target')
-        axes[1, 0].legend()
-        
-        # Longitude
-        axes[1, 1].plot(results['t'], np.rad2deg(results['theta']))
-        axes[1, 1].set_xlabel('Time [s]')
-        axes[1, 1].set_ylabel('Longitude [deg]')
-        axes[1, 1].grid(True)
-        axes[1, 1].axhline(y=np.rad2deg(self.target.theta), color='r', linestyle='--', label='Target')
-        axes[1, 1].legend()
-        
-        # Heading angle
-        axes[1, 2].plot(results['t'], np.rad2deg(results['psi']))
-        axes[1, 2].set_xlabel('Time [s]')
-        axes[1, 2].set_ylabel('Heading Angle [deg]')
-        axes[1, 2].grid(True)
-        
-        # Dynamic pressure
-        axes[2, 0].plot(results['t'], results['q']/1e3)
-        axes[2, 0].set_xlabel('Time [s]')
-        axes[2, 0].set_ylabel('Dynamic Pressure [kPa]')
-        axes[2, 0].grid(True)
-        axes[2, 0].axhline(y=self.constraints.q_max/1e3, color='r', linestyle='--', label='Limit')
-        axes[2, 0].legend()
-        
-        # Acceleration
-        axes[2, 1].plot(results['t'], results['A']/9.81)
-        axes[2, 1].set_xlabel('Time [s]')
-        axes[2, 1].set_ylabel('Acceleration [g]')
-        axes[2, 1].grid(True)
-        axes[2, 1].axhline(y=self.constraints.A_max/9.81, color='r', linestyle='--', label='Limit')
-        axes[2, 1].legend()
-        
-        # Heat flux
-        axes[2, 2].plot(results['t'], results['Q_dot']/1e3)
-        axes[2, 2].set_xlabel('Time [s]')
-        axes[2, 2].set_ylabel('Heat Flux [kW/m²]')
-        axes[2, 2].grid(True)
-        axes[2, 2].axhline(y=self.constraints.Qdot_max/1e3, color='r', linestyle='--', label='Limit')
-        axes[2, 2].legend()
-        
-        plt.tight_layout()
-        return fig
+        # Altitude [km]
+        axes1[0, 0].plot(results['t'], results['h']/1e3)
+        axes1[0, 0].scatter(results['t'][idx_final], results['h'][idx_final]/1e3, 
+                           color='black', s=50, zorder=5, label='Final')
+        axes1[0, 0].annotate(f'({results["t"][idx_final]:.1f}, {results["h"][idx_final]/1e3:.2f})',
+                            xy=(results['t'][idx_final], results['h'][idx_final]/1e3),
+                            xytext=(10, 10), textcoords='offset points',
+                            fontsize=9, bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
+        axes1[0, 0].set_xlabel('Time [s]')
+        axes1[0, 0].set_ylabel('Altitude [km]')
+        axes1[0, 0].grid(True)
+        axes1[0, 0].axhline(y=self.target.h/1e3, color='r', linestyle='--', label='Target')
+        axes1[0, 0].legend()
+
+        # Longitude theta [deg]
+        axes1[0, 1].plot(results['t'], np.rad2deg(results['theta']))
+        axes1[0, 1].scatter(results['t'][idx_final], np.rad2deg(results['theta'][idx_final]), 
+                           color='black', s=50, zorder=5, label='Final')
+        axes1[0, 1].annotate(f'({results["t"][idx_final]:.1f}, {np.rad2deg(results["theta"][idx_final]):.2f})',
+                            xy=(results['t'][idx_final], np.rad2deg(results['theta'][idx_final])),
+                            xytext=(10, 10), textcoords='offset points',
+                            fontsize=9, bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
+        axes1[0, 1].set_xlabel('Time [s]')
+        axes1[0, 1].set_ylabel('Longitude [deg]')
+        axes1[0, 1].grid(True)
+        axes1[0, 1].axhline(y=np.rad2deg(self.target.theta), color='r', linestyle='--', label='Target')
+        axes1[0, 1].legend()
+
+        # Latitude phi [deg]
+        axes1[1, 0].plot(results['t'], np.rad2deg(results['phi']))
+        axes1[1, 0].scatter(results['t'][idx_final], np.rad2deg(results['phi'][idx_final]), 
+                           color='black', s=50, zorder=5, label='Final')
+        axes1[1, 0].annotate(f'({results["t"][idx_final]:.1f}, {np.rad2deg(results["phi"][idx_final]):.2f})',
+                            xy=(results['t'][idx_final], np.rad2deg(results['phi'][idx_final])),
+                            xytext=(10, 10), textcoords='offset points',
+                            fontsize=9, bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
+        axes1[1, 0].set_xlabel('Time [s]')
+        axes1[1, 0].set_ylabel('Latitude [deg]')
+        axes1[1, 0].grid(True)
+        axes1[1, 0].axhline(y=np.rad2deg(self.target.phi), color='r', linestyle='--', label='Target')
+        axes1[1, 0].legend()
+
+        # Velocity [m/s]
+        axes1[1, 1].plot(results['t'], results['V'])
+        axes1[1, 1].scatter(results['t'][idx_final], results['V'][idx_final], 
+                           color='black', s=50, zorder=5, label='Final')
+        axes1[1, 1].annotate(f'({results["t"][idx_final]:.1f}, {results["V"][idx_final]:.1f})',
+                            xy=(results['t'][idx_final], results['V'][idx_final]),
+                            xytext=(10, 10), textcoords='offset points',
+                            fontsize=9, bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
+        axes1[1, 1].set_xlabel('Time [s]')
+        axes1[1, 1].set_ylabel('Velocity [m/s]')
+        axes1[1, 1].grid(True)
+        axes1[1, 1].axhline(y=self.target.V, color='r', linestyle='--', label='Target')
+        axes1[1, 1].legend()
+
+        # Flight path angle gamma [deg]
+        axes1[2, 0].plot(results['t'], np.rad2deg(results['gamma']))
+        axes1[2, 0].scatter(results['t'][idx_final], np.rad2deg(results['gamma'][idx_final]), 
+                           color='black', s=50, zorder=5, label='Final')
+        axes1[2, 0].annotate(f'({results["t"][idx_final]:.1f}, {np.rad2deg(results["gamma"][idx_final]):.2f})',
+                            xy=(results['t'][idx_final], np.rad2deg(results['gamma'][idx_final])),
+                            xytext=(10, 10), textcoords='offset points',
+                            fontsize=9, bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
+        axes1[2, 0].set_xlabel('Time [s]')
+        axes1[2, 0].set_ylabel('Flight Path Angle [deg]')
+        axes1[2, 0].grid(True)
+        axes1[2, 0].legend()
+
+        # Heading angle psi [deg]
+        axes1[2, 1].plot(results['t'], np.rad2deg(results['psi']))
+        axes1[2, 1].scatter(results['t'][idx_final], np.rad2deg(results['psi'][idx_final]), 
+                           color='black', s=50, zorder=5, label='Final')
+        axes1[2, 1].annotate(f'({results["t"][idx_final]:.1f}, {np.rad2deg(results["psi"][idx_final]):.2f})',
+                            xy=(results['t'][idx_final], np.rad2deg(results['psi'][idx_final])),
+                            xytext=(10, 10), textcoords='offset points',
+                            fontsize=9, bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
+        axes1[2, 1].set_xlabel('Time [s]')
+        axes1[2, 1].set_ylabel('Heading Angle [deg]')
+        axes1[2, 1].grid(True)
+        axes1[2, 1].legend()
+
+        # Bank angle sigma [deg]
+        axes1[3, 0].plot(results['t'], np.rad2deg(results['sigma']))
+        axes1[3, 0].scatter(results['t'][idx_final], np.rad2deg(results['sigma'][idx_final]), 
+                           color='black', s=50, zorder=5, label='Final')
+        axes1[3, 0].annotate(f'({results["t"][idx_final]:.1f}, {np.rad2deg(results["sigma"][idx_final]):.2f})',
+                            xy=(results['t'][idx_final], np.rad2deg(results['sigma'][idx_final])),
+                            xytext=(10, 10), textcoords='offset points',
+                            fontsize=9, bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
+        axes1[3, 0].set_xlabel('Time [s]')
+        axes1[3, 0].set_ylabel('Bank Angle [deg]')
+        axes1[3, 0].grid(True)
+        axes1[3, 0].legend()
+
+        # Hide the unused subplot
+        axes1[3, 1].axis('off')
+
+        fig_states.tight_layout()
+
+        # Figure 2: Path constraints
+        fig_constr, axes2 = plt.subplots(1, 4, figsize=(20, 4))
+        fig_constr.suptitle('Mars Reentry Vehicle - Path Constraints', fontsize=16)
+
+        # Dynamic pressure [kPa]
+        axes2[0].plot(results['t'], results['q']/1e3)
+        axes2[0].scatter(results['t'][idx_final], results['q'][idx_final]/1e3, 
+                        color='black', s=50, zorder=5, label='Final')
+        axes2[0].annotate(f'({results["t"][idx_final]:.1f}, {results["q"][idx_final]/1e3:.2f})',
+                         xy=(results['t'][idx_final], results['q'][idx_final]/1e3),
+                         xytext=(10, 10), textcoords='offset points',
+                         fontsize=9, bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
+        axes2[0].set_xlabel('Time [s]')
+        axes2[0].set_ylabel('Dynamic Pressure [kPa]')
+        axes2[0].grid(True)
+        axes2[0].axhline(y=self.constraints.q_max/1e3, color='r', linestyle='--', label='Limit')
+        axes2[0].legend()
+
+        # Acceleration [g]
+        axes2[1].plot(results['t'], results['A']/9.81)
+        axes2[1].scatter(results['t'][idx_final], results['A'][idx_final]/9.81, 
+                        color='black', s=50, zorder=5, label='Final')
+        axes2[1].annotate(f'({results["t"][idx_final]:.1f}, {results["A"][idx_final]/9.81:.2f})',
+                         xy=(results['t'][idx_final], results['A'][idx_final]/9.81),
+                         xytext=(10, 10), textcoords='offset points',
+                         fontsize=9, bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
+        axes2[1].set_xlabel('Time [s]')
+        axes2[1].set_ylabel('Acceleration [g]')
+        axes2[1].grid(True)
+        axes2[1].axhline(y=self.constraints.A_max/9.81, color='r', linestyle='--', label='Limit')
+        axes2[1].legend()
+
+        # Heat flux [kW/m^2]
+        axes2[2].plot(results['t'], results['Q_dot']/1e3)
+        axes2[2].scatter(results['t'][idx_final], results['Q_dot'][idx_final]/1e3, 
+                        color='black', s=50, zorder=5, label='Final')
+        axes2[2].annotate(f'({results["t"][idx_final]:.1f}, {results["Q_dot"][idx_final]/1e3:.2f})',
+                         xy=(results['t'][idx_final], results['Q_dot'][idx_final]/1e3),
+                         xytext=(10, 10), textcoords='offset points',
+                         fontsize=9, bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
+        axes2[2].set_xlabel('Time [s]')
+        axes2[2].set_ylabel('Heat Flux [kW/m²]')
+        axes2[2].grid(True)
+        axes2[2].axhline(y=self.constraints.Qdot_max/1e3, color='r', linestyle='--', label='Limit')
+        axes2[2].legend()
+
+        # Mach number
+        axes2[3].plot(results['t'], results['Mach'])
+        axes2[3].scatter(results['t'][idx_final], results['Mach'][idx_final], 
+                        color='black', s=50, zorder=5, label='Final')
+        axes2[3].annotate(f'({results["t"][idx_final]:.1f}, {results["Mach"][idx_final]:.2f})',
+                         xy=(results['t'][idx_final], results['Mach'][idx_final]),
+                         xytext=(10, 10), textcoords='offset points',
+                         fontsize=9, bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
+        axes2[3].set_xlabel('Time [s]')
+        axes2[3].set_ylabel('Mach Number [-]')
+        axes2[3].grid(True)
+        axes2[3].legend()
+
+        fig_constr.tight_layout()
+
+        return fig_states, fig_constr
 
 
 def main():
@@ -459,8 +567,14 @@ def main():
     print(f"  Latitude: {np.rad2deg(target.phi):.2f} deg")
     print(f"  Longitude: {np.rad2deg(target.theta):.2f} deg")
     
+    # Calculate initial range-to-go
+    d, sin_d, cos_d, RC, RD, RD_go, Rgo = spherical_metrics(
+        ic.phi, ic.theta, ic.phi, ic.theta, target.phi, target.theta, mars.radius
+    )
+    print(f"\nInitial Range-to-Go: {Rgo/1e3:.2f} km")
+    
     print("\nRunning simulation...")
-    results = sim.run(start_time=0.0, stop_time=7000.0, time_step=0.1, bank_angle=0.0)
+    results = sim.run(start_time=0.0, stop_time=7000.0, time_step=0.1, bank_angle=(100.0)*np.pi/180)
     
     print(f"\nSimulation completed in {results['t'][-1]:.2f} seconds")
     print(f"Final altitude: {results['h'][-1]/1e3:.2f} km")
@@ -480,7 +594,7 @@ def main():
     
     # Plot results
     print("\nGenerating plots...")
-    fig = sim.plot_results(results)
+    fig_states, fig_constraints = sim.plot_results(results)
     plt.show()
     
     print("\nSimulation complete!")
