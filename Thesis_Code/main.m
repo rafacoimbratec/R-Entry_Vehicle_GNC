@@ -1,5 +1,6 @@
 %% Planet Constants - Mars
 clear; clc; close all;
+format long;
 % === Mars Radius ===
 Mars_radius = 3396.2e3;  % [m]
 
@@ -51,7 +52,7 @@ phi_t   = (0.276)*deg2rad;    % Target latitude [deg]
 V_t     = 450;      % Final velocity [m/s]
 h_t     = 2480;     % Final altitude [m]
 rt = (h_t+Mars_radius);
-e_t = Mars_mu / rt - 0.5 * V_t^2;
+e_t = Mars_mu / rt - 0.5 * V_t^2
 %% Targeting Accuracy Requirement
 Rgo_target = 5e3;  % Maximum allowable targeting error [m] (5 km)
 

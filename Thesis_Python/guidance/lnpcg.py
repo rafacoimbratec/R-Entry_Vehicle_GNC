@@ -46,6 +46,7 @@ class LNPCGuidance(BaseGuidance):
         
         self.sigma_f = np.deg2rad(sigma_f_deg)
         self.e_f = e_f
+        print(f"Initializing LNPCG with final bank angle {sigma_f_deg}° and terminal energy {e_f} J/kg")
         self.activation_time = activation_time
         self.max_iter = max_iter
         self.epsilon = epsilon
@@ -72,6 +73,7 @@ class LNPCGuidance(BaseGuidance):
         """
         # Before activation, use zero bank
         if t <= self.activation_time:
+            print(f"LNPCG inactive at t={t:.1f}s, using zero bank")
             return 0.0
         
         # Get required objects from kwargs
@@ -91,9 +93,9 @@ class LNPCGuidance(BaseGuidance):
             state.phi, state.theta, state.phi, state.theta, 
             target.phi, target.theta, mars_radius
         )
-        s_target = Rgo  # Total range-to-go [m]
-        
-        # Check if we're close to terminal energy
+        s_target = Rgo  # Total range-to-go [m]        # Check if we're close to terminal energy
+        print(f"LNPCG at t={t:.1f}s: e_current={e_current:.1f} J/kg, s_target={s_target:.1f} m", f"sigma={self.sigma_prev}")
+
         if abs(e_current - self.e_f) <= 1.0:
             return self.sigma_f
         
@@ -105,12 +107,12 @@ class LNPCGuidance(BaseGuidance):
         
         if z_0 * z_200 > 0:
             # Root not bracketed - use previous bank angle
-            print(f"  Warning: LNPCG root not bracketed at t={t:.1f}s. Using previous sigma.")
+            print("Warning: LNPCG root not bracketed, using previous bank angle")
             return self.sigma_prev
         
         # Newton-Raphson iteration to find optimal sigma0
         sigma0_current = self.sigma0_guess
-        
+
         for k in range(self.max_iter):
             # Predict surface distance at current sigma0
             s_pred = self._propagate_energy(state, sigma0_current, atmosphere, 
@@ -134,21 +136,24 @@ class LNPCGuidance(BaseGuidance):
             
             # Newton-Raphson update
             sigma0_current = sigma0_current - (s_pred - s_target) / dz_dsigma
+            print(f"  Iter {k+1}: sigma0={np.rad2deg(sigma0_current):.2f}°, s_pred={s_pred:.1f} m, error={s_pred - s_target:.1f} m")
         
         # Update guess for next iteration
         self.sigma0_guess = sigma0_current
         
-        # Compute linear bank profile: sigma(e) = sigma0 + (e-e0)/(ef-e0)*(sigmaf-sigma0)
+        # Compute linear bank profile: sigma_cmd = sigma0 + (e-e0)/(ef-e0)*(sigmaf-sigma0)
+        # At current time: e = e_current, so this gives the current commanded bank angle
+        # Note: sigma0 is found at e0 = e_current, so at this instant sigma_cmd = sigma0
+        # But we store sigma0 as the "initial" value of the linear profile
         sigma_cmd = sigma0_current + (e_current - e_current) / (self.e_f - e_current) * \
                     (self.sigma_f - sigma0_current)
         
-        # Simplifies to sigma_cmd = sigma0_current at current time
-        # But as energy evolves, this will transition to sigma_f
-        sigma_cmd = sigma0_current
+        # This simplifies to sigma_cmd = sigma0_current (since (e_current - e_current) = 0)
+        # The linear profile will be used in the propagator where e evolves
+        #sigma_cmd = sigma0_current
         
         # Clip to [-π, π]
         sigma_cmd = np.clip(sigma_cmd, -np.pi, np.pi)
-        
         # Store for fallback
         self.sigma_prev = sigma_cmd
         
@@ -193,6 +198,7 @@ class LNPCGuidance(BaseGuidance):
             # Atmosphere
             h = r - mars_radius
             rho = atmosphere.density(h)
+            #rho = 0.020*np.exp(-h / 11100) #self.mars.rho0 * np.exp(-h / self.mars.H_s)
             
             # Aerodynamic forces
             D = rho * V**2 / (2 * beta)
@@ -206,7 +212,7 @@ class LNPCGuidance(BaseGuidance):
             
             Vdot = -D - g * np.sin(gamma) + \
                    omega**2 * r * np.cos(phi) * \
-                   (np.sin(gamma) * np.cos(phi) - np.cos(gamma) * np.sin(phi) * np.sin(psi))
+                   (np.sin(gamma) * np.cos(phi) - np.cos(gamma) * np.sin(phi) * np.cos(psi))
             
             gammadot = (L * np.cos(sigma)) / V + \
                        (V / r - g / V) * np.cos(gamma) + \

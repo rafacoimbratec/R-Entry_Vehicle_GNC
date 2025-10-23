@@ -331,6 +331,7 @@ class ReentrySimulation:
             if guidance is not None:
                 sigma = guidance.update(t, state, self.target, self.mars.radius,
                                        atmosphere=self.atmosphere, constraints=self.constraints)
+                #print(f"  LNPCG commanded bank angle: {np.rad2deg(sigma):.2f}°")
             else:
                 sigma = bank_angle
             
@@ -582,15 +583,23 @@ def main():
     )
     print(f"\nInitial Range-to-Go: {Rgo/1e3:.2f} km")
     
-    # Option 1: Use guidance object (NEW MODULAR WAY)
-    guidance = ConstantBankGuidance(bank_angle_deg=100.0)
+    # Create LNPCG guidance
+    guidance = LNPCGuidance(
+        sigma_f_deg=0.0,        # Final bank angle at terminal energy [deg]
+        e_f=mars.mu/(mars.radius+target.h) - 0.5*target.V**2,  # Terminal energy [J/kg]
+        activation_time=170.0,  # Activate guidance after 170 seconds
+        max_iter=50,            # Maximum Newton-Raphson iterations
+        epsilon=100.0,          # Convergence tolerance [m]
+        de=10.0,               # Energy step for propagation [J/kg]
+        dsigma_deg=10.0         # Bank angle step for finite difference [deg]
+    )
     print(f"\nUsing guidance: {guidance}")
+    
+    # Alternative: Use constant bank guidance
+    # guidance = ConstantBankGuidance(bank_angle_deg=100.0)
     
     print("\nRunning simulation...")
     results = sim.run(start_time=0.0, stop_time=7000.0, time_step=0.1, guidance=guidance)
-    
-    # Option 2: Use constant bank angle directly (OLD WAY - still works!)
-    # results = sim.run(start_time=0.0, stop_time=7000.0, time_step=0.1, bank_angle=100.0*np.pi/180)
     
     print(f"\nSimulation completed in {results['t'][-1]:.2f} seconds")
     print(f"Final altitude: {results['h'][-1]/1e3:.2f} km")
