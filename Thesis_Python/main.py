@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import Tuple, List
 from spherical_metrics import spherical_metrics
+from guidance import ConstantBankGuidance, LNPCGuidance
 
 
 @dataclass
@@ -274,7 +275,7 @@ class ReentrySimulation:
         self.dynamics = ReentryDynamics(mars, vehicle, self.atmosphere)
     
     def run(self, start_time: float = 0.0, stop_time: float = 7000.0,
-            time_step: float = 0.01, bank_angle: float = 0.0) -> dict:
+            time_step: float = 0.01, guidance=None, bank_angle: float = 0.0) -> dict:
         """
         Run the reentry simulation
         
@@ -282,7 +283,8 @@ class ReentrySimulation:
             start_time: Start time [s]
             stop_time: Stop time [s]
             time_step: Time step [s]
-            bank_angle: Constant bank angle for testing [rad]
+            guidance: Guidance object (BaseGuidance subclass) or None for constant bank
+            bank_angle: Constant bank angle if guidance=None [rad]
             
         Returns:
             results: Dictionary containing simulation results
@@ -325,6 +327,13 @@ class ReentrySimulation:
             if i % progress_interval == 0 and i > 0:
                 print(f"  Progress: {100*i/n_steps:.1f}% (t={t:.1f}s, h={state.h/1e3:.1f}km)")
             
+            # Compute bank angle from guidance law or use constant
+            if guidance is not None:
+                sigma = guidance.update(t, state, self.target, self.mars.radius,
+                                       atmosphere=self.atmosphere, constraints=self.constraints)
+            else:
+                sigma = bank_angle
+            
             # Store current state
             results['r'][i] = state.r
             results['h'][i] = state.h
@@ -333,7 +342,7 @@ class ReentrySimulation:
             results['V'][i] = state.V
             results['gamma'][i] = state.gamma
             results['psi'][i] = state.psi
-            results['sigma'][i] = bank_angle
+            results['sigma'][i] = sigma
             
             # Calculate aerodynamic quantities
             aero = self.dynamics.calculate_aerodynamic_quantities(state)
@@ -360,7 +369,7 @@ class ReentrySimulation:
                 break
             
             # Integrate to next time step
-            state = self.dynamics.rk4_step(state, bank_angle, time_step)
+            state = self.dynamics.rk4_step(state, sigma, time_step)
         
         return results
     
@@ -573,8 +582,15 @@ def main():
     )
     print(f"\nInitial Range-to-Go: {Rgo/1e3:.2f} km")
     
+    # Option 1: Use guidance object (NEW MODULAR WAY)
+    guidance = ConstantBankGuidance(bank_angle_deg=100.0)
+    print(f"\nUsing guidance: {guidance}")
+    
     print("\nRunning simulation...")
-    results = sim.run(start_time=0.0, stop_time=7000.0, time_step=0.1, bank_angle=(100.0)*np.pi/180)
+    results = sim.run(start_time=0.0, stop_time=7000.0, time_step=0.1, guidance=guidance)
+    
+    # Option 2: Use constant bank angle directly (OLD WAY - still works!)
+    # results = sim.run(start_time=0.0, stop_time=7000.0, time_step=0.1, bank_angle=100.0*np.pi/180)
     
     print(f"\nSimulation completed in {results['t'][-1]:.2f} seconds")
     print(f"Final altitude: {results['h'][-1]/1e3:.2f} km")
