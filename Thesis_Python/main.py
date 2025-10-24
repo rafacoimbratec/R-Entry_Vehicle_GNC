@@ -585,12 +585,12 @@ def main():
     
     # Create LNPCG guidance
     guidance = LNPCGuidance(
-        sigma_f_deg=0.0,        # Final bank angle at terminal energy [deg]
+        sigma_f_deg=10.0,        # Final bank angle at terminal energy [deg]
         e_f=mars.mu/(mars.radius+target.h) - 0.5*target.V**2,  # Terminal energy [J/kg]
         activation_time=170.0,  # Activate guidance after 170 seconds
         max_iter=50,            # Maximum Newton-Raphson iterations
         epsilon=100.0,          # Convergence tolerance [m]
-        de=10.0,               # Energy step for propagation [J/kg]
+        de=1000.0,               # Energy step for propagation [J/kg]
         dsigma_deg=10.0         # Bank angle step for finite difference [deg]
     )
     print(f"\nUsing guidance: {guidance}")

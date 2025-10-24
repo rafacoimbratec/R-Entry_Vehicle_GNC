@@ -24,7 +24,7 @@ class LNPCGuidance(BaseGuidance):
     
     def __init__(self, 
                  sigma_f_deg: float = 0.0,
-                 e_f: float = -2.0e6,
+                 e_f: float = 12500221.74785505,
                  activation_time: float = 170.0,
                  max_iter: int = 50,
                  epsilon: float = 100.0,
@@ -54,7 +54,7 @@ class LNPCGuidance(BaseGuidance):
         self.dsigma = np.deg2rad(dsigma_deg)
         
         # Initial guess for bank angle (will be updated during flight)
-        self.sigma0_guess = 100.0
+        self.sigma0_guess = np.deg2rad(100.0)
         self.sigma_prev = 0.0
         
     def compute_bank_angle(self, t: float, state, target, mars_radius: float, **kwargs) -> float:
@@ -93,8 +93,8 @@ class LNPCGuidance(BaseGuidance):
             state.phi, state.theta, state.phi, state.theta, 
             target.phi, target.theta, mars_radius
         )
-        s_target = Rgo  # Total range-to-go [m]        # Check if we're close to terminal energy
-        print(f"LNPCG at t={t:.1f}s: e_current={e_current:.1f} J/kg, s_target={s_target:.1f} m", f"sigma={self.sigma_prev}")
+        s_target = Rgo  # Total range-to-go [m]
+        print(f"LNPCG at t={t:.1f}s: e_current={e_current:.1f} J/kg, s_target={s_target:.1f} m", f"sigma={np.rad2deg(self.sigma_prev):.2f}°")
 
         if abs(e_current - self.e_f) <= 1.0:
             return self.sigma_f
@@ -136,7 +136,7 @@ class LNPCGuidance(BaseGuidance):
             
             # Newton-Raphson update
             sigma0_current = sigma0_current - (s_pred - s_target) / dz_dsigma
-            print(f"  Iter {k+1}: sigma0={np.rad2deg(sigma0_current):.2f}°, s_pred={s_pred:.1f} m, error={s_pred - s_target:.1f} m")
+            #print(f"  Iter {k+1}: sigma0={np.rad2deg(sigma0_current):.2f}°, s_pred={s_pred:.1f} m, error={s_pred - s_target:.1f} m")
         
         # Update guess for next iteration
         self.sigma0_guess = sigma0_current
@@ -206,24 +206,28 @@ class LNPCGuidance(BaseGuidance):
             g = mu / r**2
             
             # 3DOF equations of motion
-            rdot = V * np.sin(gamma)
-            thetadot = V * np.cos(gamma) * np.sin(psi) / (r * np.cos(phi))
-            phidot = V * np.cos(gamma) * np.cos(psi) / r
-            
-            Vdot = -D - g * np.sin(gamma) + \
-                   omega**2 * r * np.cos(phi) * \
-                   (np.sin(gamma) * np.cos(phi) - np.cos(gamma) * np.sin(phi) * np.cos(psi))
-            
-            gammadot = (L * np.cos(sigma)) / V + \
-                       (V / r - g / V) * np.cos(gamma) + \
-                       2 * omega * np.cos(phi) * np.sin(psi) + \
-                       (omega**2 * r / V) * np.cos(phi) * \
-                       (np.cos(gamma) * np.cos(phi) + np.sin(gamma) * np.sin(phi) * np.cos(psi))
-            
-            psidot = (L * np.sin(sigma)) / (V * np.cos(gamma)) + \
-                     (V / r) * np.cos(gamma) * np.sin(psi) * np.tan(phi) - \
-                     2 * omega * (np.tan(gamma) * np.cos(phi) * np.cos(psi) - np.sin(phi)) + \
-                     (omega**2 * r / (V * np.cos(gamma))) * np.sin(phi) * np.cos(phi) * np.sin(psi)
+            # Centrifugal acceleration terms
+            V_h = V * np.cos(gamma)  # Horizontal velocity
+        
+            # State derivatives
+            r_dot = V * np.sin(gamma)
+        
+            theta_dot = (V_h * np.sin(psi)) / (r * np.cos(phi))
+        
+            phi_dot = (V_h * np.cos(psi)) / r
+        
+            V_dot = -D - g * np.sin(gamma) + omega**2 * r * np.cos(phi) * \
+                (np.sin(gamma) * np.cos(phi) - np.cos(gamma) * np.sin(phi) * np.sin(psi))
+        
+            gamma_dot = (L * np.cos(sigma) / V) + (V / r - g / V) * np.cos(gamma) + \
+                    2 * omega * np.cos(phi) * np.sin(psi) + \
+                    (omega**2 * r / V) * np.cos(phi) * \
+                    (np.cos(gamma) * np.cos(phi) + np.sin(gamma) * np.sin(phi) * np.cos(psi))
+        
+            psi_dot = (L * np.sin(sigma)) / (V * np.cos(gamma)) + \
+                  (V_h / r) * np.sin(psi) * np.tan(phi) - \
+                  2 * omega * (np.tan(gamma) * np.cos(phi) * np.cos(psi) - np.sin(phi)) + \
+                  (omega**2 * r / (V * np.cos(gamma))) * np.sin(phi) * np.cos(phi) * np.sin(psi)
             
             # Energy rate
             e_dot = D * V
@@ -234,14 +238,15 @@ class LNPCGuidance(BaseGuidance):
             
             # Time step based on energy step
             dt = self.de / e_dot
+            #print(f"dt={dt:.5f}s, e_dot={e_dot:.2f} J/kg/s")
             
             # Euler integration
-            r = r + rdot * dt
-            V = V + Vdot * dt
-            gamma = gamma + gammadot * dt
-            psi = psi + psidot * dt
-            theta = theta + thetadot * dt
-            phi = phi + phidot * dt
+            r = r + r_dot * dt
+            V = V + V_dot * dt
+            gamma = gamma + gamma_dot * dt
+            psi = psi + psi_dot * dt
+            theta = theta + theta_dot * dt
+            phi = phi + phi_dot * dt
             
             # Accumulate surface distance
             s_pred = s_pred + V * np.cos(gamma) * dt
@@ -250,7 +255,7 @@ class LNPCGuidance(BaseGuidance):
             e = e + self.de
             
             # Safety check: prevent infinite loop
-            if e > 0 or r < mars_radius:
+            if r < mars_radius:
                 break
         
         return s_pred
@@ -258,7 +263,7 @@ class LNPCGuidance(BaseGuidance):
     def reset(self):
         """Reset guidance state"""
         super().reset()
-        self.sigma0_guess = 0.0
+        self.sigma0_guess = np.deg2rad(100.0)
         self.sigma_prev = 0.0
     
     def __repr__(self):
