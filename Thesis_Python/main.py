@@ -190,7 +190,7 @@ class ReentryDynamics:
         phi_dot = (V_h * np.cos(psi)) / r
         
         V_dot = -D - g * np.sin(gamma) + self.mars.omega**2 * r * np.cos(phi) * \
-                (np.sin(gamma) * np.cos(phi) - np.cos(gamma) * np.sin(phi) * np.sin(psi))
+                (np.sin(gamma) * np.cos(phi) - np.cos(gamma) * np.sin(phi) * np.cos(psi))
         
         gamma_dot = (L * np.cos(sigma) / V) + (V / r - g / V) * np.cos(gamma) + \
                     2 * self.mars.omega * np.cos(phi) * np.sin(psi) + \
@@ -275,7 +275,7 @@ class ReentrySimulation:
         self.dynamics = ReentryDynamics(mars, vehicle, self.atmosphere)
     
     def run(self, start_time: float = 0.0, stop_time: float = 7000.0,
-            time_step: float = 0.01, guidance=None, bank_angle: float = 0.0) -> dict:
+            time_step: float = 0.01, guidance=None, bank_angle: float = 0.0, guidance_dt: float = None) -> dict:
         """
         Run the reentry simulation
         
@@ -298,6 +298,12 @@ class ReentrySimulation:
         time = np.arange(start_time, stop_time, time_step)
         n_steps = len(time)
         
+        # Guidance timing setup
+        if guidance_dt is None:
+            guidance_dt = time_step
+        last_sigma = bank_angle if guidance is None else 0.0
+        next_guidance_time = start_time
+        
         # Preallocate arrays
         results = {
             't': time,
@@ -316,6 +322,9 @@ class ReentrySimulation:
             'D': np.zeros(n_steps),
             'L': np.zeros(n_steps),
             'Mach': np.zeros(n_steps),
+            'RD_go': np.zeros(n_steps),
+            'RC': np.zeros(n_steps),
+            'Rgo': np.zeros(n_steps),
         }
         
         # Progress tracking
@@ -324,14 +333,19 @@ class ReentrySimulation:
         # Simulation loop
         for i, t in enumerate(time):
             # Progress update
+            #progress_interval = max(1, n_steps // 10)  # Update every 10%
+            #print(f"  Progress: {100*i/n_steps:.1f}% (t={t:.1f}s, h={state.h/1e3:.1f}km)")
             if i % progress_interval == 0 and i > 0:
                 print(f"  Progress: {100*i/n_steps:.1f}% (t={t:.1f}s, h={state.h/1e3:.1f}km)")
             
-            # Compute bank angle from guidance law or use constant
+            # Compute bank angle from guidance at a slower rate and hold between updates
             if guidance is not None:
-                sigma = guidance.update(t, state, self.target, self.mars.radius,
-                                       atmosphere=self.atmosphere, constraints=self.constraints)
-                #print(f"  LNPCG commanded bank angle: {np.rad2deg(sigma):.2f}°")
+                if t + 1e-9 >= next_guidance_time:
+                    last_sigma = guidance.update(t, state, self.target, self.mars.radius,
+                                                 atmosphere=self.atmosphere, constraints=self.constraints)
+                    next_guidance_time += guidance_dt
+                sigma = last_sigma
+                #print(f"Time {t:.1f}s: Guidance bank angle = {np.rad2deg(sigma):.2f} deg")
             else:
                 sigma = bank_angle
             
@@ -361,13 +375,32 @@ class ReentrySimulation:
             a = np.sqrt(gamma_gas * R_s * T)  # Speed of sound [m/s]
             results['Mach'][i] = state.V / a
             
+            # Calculate range metrics
+            d, sin_d, cos_d, RC, RD, RD_go, Rgo = spherical_metrics(
+                self.ic.phi, self.ic.theta, state.phi, state.theta,
+                self.target.phi, self.target.theta, self.mars.radius
+            )
+            results['RD_go'][i] = RD_go
+            results['RC'][i] = RC
+            results['Rgo'][i] = Rgo
+            
             # Check termination conditions
             if state.h < 0:
                 # Trim arrays to actual simulation length
                 for key in results:
                     results[key] = results[key][:i+1]
-                print(f"  Progress: 100.0% (simulation ended at t={t:.1f}s)")
+                print(f"  Progress: 100.0% (simulation ended at t={t:.1f}s - altitude)")
                 break
+            
+            # Check if target energy reached (if using guidance with e_f)
+            if guidance is not None and hasattr(guidance, 'e_f'):
+                e_current = self.mars.mu / state.r - 0.5 * state.V**2
+                if abs(e_current - guidance.e_f) <= 1.0:
+                    # Trim arrays to actual simulation length
+                    for key in results:
+                        results[key] = results[key][:i+1]
+                    print(f"  Progress: 100.0% (simulation ended at t={t:.1f}s - target energy reached)")
+                    break
             
             # Integrate to next time step
             state = self.dynamics.rk4_step(state, sigma, time_step)
@@ -544,7 +577,55 @@ class ReentrySimulation:
 
         fig_constr.tight_layout()
 
-        return fig_states, fig_constr
+        # Figure 3: Range metrics
+        fig_range, axes3 = plt.subplots(1, 3, figsize=(18, 5))
+        fig_range.suptitle('Mars Reentry Vehicle - Range Metrics', fontsize=16)
+
+        # Ground track: Latitude vs Longitude
+        axes3[0].plot(np.rad2deg(results['theta']), np.rad2deg(results['phi']), 'b-', linewidth=2, label='Trajectory')
+        axes3[0].scatter(np.rad2deg(results['theta'][0]), np.rad2deg(results['phi'][0]), 
+                        color='green', s=100, marker='o', zorder=5, label='Entry')
+        axes3[0].scatter(np.rad2deg(results['theta'][idx_final]), np.rad2deg(results['phi'][idx_final]), 
+                        color='black', s=100, marker='o', zorder=5, label='Final')
+        axes3[0].scatter(np.rad2deg(self.target.theta), np.rad2deg(self.target.phi), 
+                        color='red', s=150, marker='*', zorder=5, label='Target')
+        axes3[0].set_xlabel('Longitude [deg]')
+        axes3[0].set_ylabel('Latitude [deg]')
+        axes3[0].set_title('Ground Track')
+        axes3[0].grid(True)
+        axes3[0].legend()
+        axes3[0].axis('equal')
+
+        # Cross-range (RC) [km]
+        axes3[1].plot(results['t'], results['RC']/1e3)
+        axes3[1].scatter(results['t'][idx_final], results['RC'][idx_final]/1e3, 
+                        color='black', s=50, zorder=5, label='Final')
+        axes3[1].annotate(f'({results["t"][idx_final]:.1f}, {results["RC"][idx_final]/1e3:.2f})',
+                         xy=(results['t'][idx_final], results['RC'][idx_final]/1e3),
+                         xytext=(10, 10), textcoords='offset points',
+                         fontsize=9, bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
+        axes3[1].set_xlabel('Time [s]')
+        axes3[1].set_ylabel('Cross-Range [km]')
+        axes3[1].grid(True)
+        axes3[1].legend()
+
+        # Total range-to-go (Rgo) [km]
+        axes3[2].plot(results['t'], results['Rgo']/1e3)
+        axes3[2].scatter(results['t'][idx_final], results['Rgo'][idx_final]/1e3, 
+                        color='black', s=50, zorder=5, label='Final')
+        axes3[2].annotate(f'({results["t"][idx_final]:.1f}, {results["Rgo"][idx_final]/1e3:.2f})',
+                         xy=(results['t'][idx_final], results['Rgo'][idx_final]/1e3),
+                         xytext=(10, 10), textcoords='offset points',
+                         fontsize=9, bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
+        axes3[2].set_xlabel('Time [s]')
+        axes3[2].set_ylabel('Range-to-Go [km]')
+        axes3[2].grid(True)
+        axes3[2].axhline(y=self.target.Rgo_target/1e3, color='r', linestyle='--', label='Target limit')
+        axes3[2].legend()
+
+        fig_range.tight_layout()
+
+        return fig_states, fig_constr, fig_range
 
 
 def main():
@@ -585,13 +666,13 @@ def main():
     
     # Create LNPCG guidance
     guidance = LNPCGuidance(
-        sigma_f_deg=10.0,        # Final bank angle at terminal energy [deg]
+        sigma_f_deg=40.0,        # Final bank angle at terminal energy [deg]
         e_f=mars.mu/(mars.radius+target.h) - 0.5*target.V**2,  # Terminal energy [J/kg]
-        activation_time=170.0,  # Activate guidance after 170 seconds
-        max_iter=50,            # Maximum Newton-Raphson iterations
+        activation_time=175.0,  # Activate guidance after 170 seconds
+        max_iter=25,            # Maximum Newton-Raphson iterations
         epsilon=100.0,          # Convergence tolerance [m]
-        de=1000.0,               # Energy step for propagation [J/kg]
-        dsigma_deg=10.0         # Bank angle step for finite difference [deg]
+        de=10000.0,             # Energy step for propagation [J/kg]
+        dsigma_deg=3.0          # Bank angle step for finite difference [deg]
     )
     print(f"\nUsing guidance: {guidance}")
     
@@ -599,7 +680,7 @@ def main():
     # guidance = ConstantBankGuidance(bank_angle_deg=100.0)
     
     print("\nRunning simulation...")
-    results = sim.run(start_time=0.0, stop_time=7000.0, time_step=0.1, guidance=guidance)
+    results = sim.run(start_time=0.0, stop_time=7000.0, time_step=0.01, guidance=guidance, guidance_dt=2.0)
     
     print(f"\nSimulation completed in {results['t'][-1]:.2f} seconds")
     print(f"Final altitude: {results['h'][-1]/1e3:.2f} km")
@@ -619,7 +700,7 @@ def main():
     
     # Plot results
     print("\nGenerating plots...")
-    fig_states, fig_constraints = sim.plot_results(results)
+    fig_states, fig_constraints, fig_range = sim.plot_results(results)
     plt.show()
     
     print("\nSimulation complete!")

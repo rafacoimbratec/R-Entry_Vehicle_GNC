@@ -28,8 +28,8 @@ class LNPCGuidance(BaseGuidance):
                  activation_time: float = 170.0,
                  max_iter: int = 50,
                  epsilon: float = 100.0,
-                 de: float = 100.0,
-                 dsigma_deg: float = 10.0):
+                 de: float = 10000.0,
+                 dsigma_deg: float = 3.0):
         """
         Initialize LNPCG guidance
         
@@ -46,9 +46,8 @@ class LNPCGuidance(BaseGuidance):
         
         self.sigma_f = np.deg2rad(sigma_f_deg)
         self.e_f = e_f
-        print(f"Initializing LNPCG with final bank angle {sigma_f_deg}° and terminal energy {e_f} J/kg")
         self.activation_time = activation_time
-        self.max_iter = max_iter
+        self.max_iter = min(max_iter, 25)
         self.epsilon = epsilon
         self.de = de
         self.dsigma = np.deg2rad(dsigma_deg)
@@ -56,7 +55,7 @@ class LNPCGuidance(BaseGuidance):
         # Initial guess for bank angle (will be updated during flight)
         self.sigma0_guess = np.deg2rad(100.0)
         self.sigma_prev = 0.0
-        
+      
     def compute_bank_angle(self, t: float, state, target, mars_radius: float, **kwargs) -> float:
         """
         Compute LNPCG commanded bank angle
@@ -73,7 +72,7 @@ class LNPCGuidance(BaseGuidance):
         """
         # Before activation, use zero bank
         if t <= self.activation_time:
-            print(f"LNPCG inactive at t={t:.1f}s, using zero bank")
+            #print(f"LNPCG inactive at t={t:.1f}s, using zero bank")
             return 0.0
         
         # Get required objects from kwargs
@@ -90,28 +89,44 @@ class LNPCGuidance(BaseGuidance):
         # Compute range-to-go using spherical metrics
         from spherical_metrics import spherical_metrics
         d, sin_d, cos_d, RC, RD, RD_go, Rgo = spherical_metrics(
-            state.phi, state.theta, state.phi, state.theta, 
-            target.phi, target.theta, mars_radius
-        )
+           np.deg2rad(-21.3), np.deg2rad(-176.40167), state.phi, state.theta, 
+            target.phi, target.theta, mars_radius)
         s_target = Rgo  # Total range-to-go [m]
         print(f"LNPCG at t={t:.1f}s: e_current={e_current:.1f} J/kg, s_target={s_target:.1f} m", f"sigma={np.rad2deg(self.sigma_prev):.2f}°")
 
         if abs(e_current - self.e_f) <= 1.0:
             return self.sigma_f
         
-        # Bracketing check: does solution exist between 0° and 200°?
-        z_0 = self._propagate_energy(state, np.deg2rad(0), atmosphere, 
-                                      mu, mars_radius, e_current) - s_target
-        z_200 = self._propagate_energy(state, np.deg2rad(200), atmosphere, 
+        # Adaptive bracketing: start centered around previous command
+        #bracket_width = np.deg2rad(120)  # ±60° initial bracket
+        sigma_low = np.deg2rad(0)
+        sigma_high = np.deg2rad(200)
+        
+        # Compute function values at bracket bounds
+        z_low = self._propagate_energy(state, sigma_low, atmosphere, 
+                                       mu, mars_radius, e_current) - s_target
+        z_high = self._propagate_energy(state, sigma_high, atmosphere, 
                                         mu, mars_radius, e_current) - s_target
         
-        if z_0 * z_200 > 0:
-            # Root not bracketed - use previous bank angle
-            print("Warning: LNPCG root not bracketed, using previous bank angle")
+        # If not bracketed, try widening once
+        if z_low * z_high > 0:
+            bracket_width = np.deg2rad(90)  # Widen to ±90°
+            sigma_low = self.sigma_prev - bracket_width
+            sigma_high = self.sigma_prev + bracket_width
+            z_low = self._propagate_energy(state, sigma_low, atmosphere, 
+                                           mu, mars_radius, e_current) - s_target
+            z_high = self._propagate_energy(state, sigma_high, atmosphere, 
+                                            mu, mars_radius, e_current) - s_target
+        
+        #print(f"  Bracketing: z({np.rad2deg(sigma_low):.1f}°)={z_low:.1f} m, z({np.rad2deg(sigma_high):.1f}°)={z_high:.1f} m")
+        
+        if z_low * z_high > 0:
+            # Root still not bracketed - use previous bank angle
+            print("Warning: LNPCG root not bracketed after widening, using previous bank angle")
             return self.sigma_prev
         
-        # Newton-Raphson iteration to find optimal sigma0
-        sigma0_current = self.sigma0_guess
+        # Use midpoint of bracket as initial guess
+        sigma0_current = (sigma_low + sigma_high) / 2.0
 
         for k in range(self.max_iter):
             # Predict surface distance at current sigma0
@@ -132,6 +147,7 @@ class LNPCGuidance(BaseGuidance):
             
             if abs(dz_dsigma) < 1e-10:
                 # Derivative too small, can't update
+                print("Warning: LNPCG derivative too small, stopping iteration")
                 break
             
             # Newton-Raphson update
@@ -180,7 +196,6 @@ class LNPCGuidance(BaseGuidance):
         omega = 7.088e-5  # Mars rotation rate [rad/s]
         
         s_pred = 0.0
-        e = e0
         
         # Unpack state
         r = state.r
@@ -190,20 +205,34 @@ class LNPCGuidance(BaseGuidance):
         gamma = state.gamma
         psi = state.psi
         
+        e = e0
+        #print(f"  Propagating from e0={e0:.1f} J/kg with sigma0={np.rad2deg(sigma0):.2f}°")
+        
         # Propagate until terminal energy
         while e < self.e_f:
+            # Adaptive energy step: reduce near terminal energy for accuracy
+            e_remaining = self.e_f - e
+            if e_remaining < 500000:  # Last 500 kJ/kg
+                de_step = min(self.de, max(100.0, e_remaining / 10))
+            else:
+                de_step = self.de
+            
             # Linear bank profile
-            sigma = sigma0 + (e - e0) / (self.e_f - e0) * (self.sigma_f - sigma0)
+            den = max(1e-9, (self.e_f - e0))
+            sigma = sigma0 + (e - e0) / den * (self.sigma_f - sigma0)
+            #print(sigma)
             
             # Atmosphere
             h = r - mars_radius
             rho = atmosphere.density(h)
+            #print(f"h={h:.1f} m, rho={rho:.6f} kg/m³")
             #rho = 0.020*np.exp(-h / 11100) #self.mars.rho0 * np.exp(-h / self.mars.H_s)
             
             # Aerodynamic forces
             D = rho * V**2 / (2 * beta)
             L = L_over_D * D
             g = mu / r**2
+            #print(f"D={D:.2f} m/s², L={L:.2f} m/s², g={g:.2f} m/s²")
             
             # 3DOF equations of motion
             # Centrifugal acceleration terms
@@ -217,7 +246,7 @@ class LNPCGuidance(BaseGuidance):
             phi_dot = (V_h * np.cos(psi)) / r
         
             V_dot = -D - g * np.sin(gamma) + omega**2 * r * np.cos(phi) * \
-                (np.sin(gamma) * np.cos(phi) - np.cos(gamma) * np.sin(phi) * np.sin(psi))
+                (np.sin(gamma) * np.cos(phi) - np.cos(gamma) * np.sin(phi) * np.cos(psi))
         
             gamma_dot = (L * np.cos(sigma) / V) + (V / r - g / V) * np.cos(gamma) + \
                     2 * omega * np.cos(phi) * np.sin(psi) + \
@@ -225,19 +254,20 @@ class LNPCGuidance(BaseGuidance):
                     (np.cos(gamma) * np.cos(phi) + np.sin(gamma) * np.sin(phi) * np.cos(psi))
         
             psi_dot = (L * np.sin(sigma)) / (V * np.cos(gamma)) + \
-                  (V_h / r) * np.sin(psi) * np.tan(phi) - \
-                  2 * omega * (np.tan(gamma) * np.cos(phi) * np.cos(psi) - np.sin(phi)) + \
+                  (V_h / r) * np.sin(psi) * np.tan(phi) + \
+                  2 * omega * (np.sin(phi)-np.tan(gamma) * np.cos(phi) * np.cos(psi)) + \
                   (omega**2 * r / (V * np.cos(gamma))) * np.sin(phi) * np.cos(phi) * np.sin(psi)
             
             # Energy rate
             e_dot = D * V
+            #print(f"    e={e:.1f} J/kg, e_dot={e_dot:.1f} J/kg/s")
             
-            if abs(e_dot) < 1e-10:
-                # Energy not changing, break to avoid division by zero
+            if abs(e_dot) < 1e-6:
+                # Energy not changing significantly, break to avoid division issues
                 break
             
-            # Time step based on energy step
-            dt = self.de / e_dot
+            # Time step based on energy step, capped for stability
+            dt = min(de_step / e_dot, 0.5)
             #print(f"dt={dt:.5f}s, e_dot={e_dot:.2f} J/kg/s")
             
             # Euler integration
@@ -251,8 +281,8 @@ class LNPCGuidance(BaseGuidance):
             # Accumulate surface distance
             s_pred = s_pred + V * np.cos(gamma) * dt
             
-            # Update energy
-            e = e + self.de
+            # Update energy with adaptive step
+            e = e + de_step
             
             # Safety check: prevent infinite loop
             if r < mars_radius:

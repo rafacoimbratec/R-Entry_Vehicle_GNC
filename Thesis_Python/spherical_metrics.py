@@ -125,7 +125,7 @@ if __name__ == "__main__":
     Mars_radius = 3396.2e3  # m (example value)
 
     d, sin_d, cos_d, RC, RD, RD_go, Rgo = spherical_metrics(
-        lat0, lon0, lat0, lon0, lat_t, lon_t, Mars_radius
+        lat0, lon0, 22.3 * deg2rad, 2 * deg2rad, lat_t, lon_t, Mars_radius
     )
 
     print(f"Initial Range-to-Go: {Rgo/1000:.2f} km")
