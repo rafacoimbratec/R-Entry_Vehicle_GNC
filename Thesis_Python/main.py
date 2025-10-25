@@ -322,6 +322,7 @@ class ReentrySimulation:
             'D': np.zeros(n_steps),
             'L': np.zeros(n_steps),
             'Mach': np.zeros(n_steps),
+            'energy': np.zeros(n_steps),
             'RD_go': np.zeros(n_steps),
             'RC': np.zeros(n_steps),
             'Rgo': np.zeros(n_steps),
@@ -374,6 +375,9 @@ class ReentrySimulation:
             R_s = self.mars.R_s
             a = np.sqrt(gamma_gas * R_s * T)  # Speed of sound [m/s]
             results['Mach'][i] = state.V / a
+
+            # Calculate specific mechanical energy e = mu/r - V^2/2 [J/kg]
+            results['energy'][i] = self.mars.mu / state.r - 0.5 * state.V**2
             
             # Calculate range metrics
             d, sin_d, cos_d, RC, RD, RD_go, Rgo = spherical_metrics(
@@ -395,7 +399,7 @@ class ReentrySimulation:
             # Check if target energy reached (if using guidance with e_f)
             if guidance is not None and hasattr(guidance, 'e_f'):
                 e_current = self.mars.mu / state.r - 0.5 * state.V**2
-                if abs(e_current - guidance.e_f) <= 1.0:
+                if abs(e_current - guidance.e_f) <= 100.0:
                     # Trim arrays to actual simulation length
                     for key in results:
                         results[key] = results[key][:i+1]
@@ -517,7 +521,7 @@ class ReentrySimulation:
         fig_states.tight_layout()
 
         # Figure 2: Path constraints
-        fig_constr, axes2 = plt.subplots(1, 4, figsize=(20, 4))
+        fig_constr, axes2 = plt.subplots(1, 5, figsize=(24, 4))
         fig_constr.suptitle('Mars Reentry Vehicle - Path Constraints', fontsize=16)
 
         # Dynamic pressure [kPa]
@@ -575,6 +579,21 @@ class ReentrySimulation:
         axes2[3].grid(True)
         axes2[3].legend()
 
+        # Specific mechanical energy [MJ/kg]
+        e_target = self.mars.mu / (self.mars.radius + self.target.h) - 0.5 * self.target.V**2
+        axes2[4].plot(results['t'], results['energy']/1e6)
+        axes2[4].scatter(results['t'][idx_final], results['energy'][idx_final]/1e6,
+            color='black', s=50, zorder=5, label='Final')
+        axes2[4].annotate(f'({results["t"][idx_final]:.1f}, {results["energy"][idx_final]/1e6:.3f})',
+             xy=(results['t'][idx_final], results['energy'][idx_final]/1e6),
+             xytext=(10, 10), textcoords='offset points',
+             fontsize=9, bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
+        axes2[4].axhline(y=e_target/1e6, color='r', linestyle='--', label='Target Energy')
+        axes2[4].set_xlabel('Time [s]')
+        axes2[4].set_ylabel('Energy [MJ/kg]')
+        axes2[4].grid(True)
+        axes2[4].legend()
+
         fig_constr.tight_layout()
 
         # Figure 3: Range metrics
@@ -584,11 +603,11 @@ class ReentrySimulation:
         # Ground track: Latitude vs Longitude
         axes3[0].plot(np.rad2deg(results['theta']), np.rad2deg(results['phi']), 'b-', linewidth=2, label='Trajectory')
         axes3[0].scatter(np.rad2deg(results['theta'][0]), np.rad2deg(results['phi'][0]), 
-                        color='green', s=100, marker='o', zorder=5, label='Entry')
+                 color='green', s=100, marker='o', zorder=5, label='Entry')
         axes3[0].scatter(np.rad2deg(results['theta'][idx_final]), np.rad2deg(results['phi'][idx_final]), 
-                        color='black', s=100, marker='o', zorder=5, label='Final')
+                 color='black', s=100, marker='o', zorder=5, label='Final')
         axes3[0].scatter(np.rad2deg(self.target.theta), np.rad2deg(self.target.phi), 
-                        color='red', s=150, marker='*', zorder=5, label='Target')
+                 color='red', s=150, marker='*', zorder=5, label='Target')
         axes3[0].set_xlabel('Longitude [deg]')
         axes3[0].set_ylabel('Latitude [deg]')
         axes3[0].set_title('Ground Track')
@@ -599,29 +618,29 @@ class ReentrySimulation:
         # Cross-range (RC) [km]
         axes3[1].plot(results['t'], results['RC']/1e3)
         axes3[1].scatter(results['t'][idx_final], results['RC'][idx_final]/1e3, 
-                        color='black', s=50, zorder=5, label='Final')
+                 color='black', s=50, zorder=5, label='Final')
         axes3[1].annotate(f'({results["t"][idx_final]:.1f}, {results["RC"][idx_final]/1e3:.2f})',
-                         xy=(results['t'][idx_final], results['RC'][idx_final]/1e3),
-                         xytext=(10, 10), textcoords='offset points',
-                         fontsize=9, bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
+                  xy=(results['t'][idx_final], results['RC'][idx_final]/1e3),
+                  xytext=(10, 10), textcoords='offset points',
+                  fontsize=9, bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
         axes3[1].set_xlabel('Time [s]')
         axes3[1].set_ylabel('Cross-Range [km]')
         axes3[1].grid(True)
         axes3[1].legend()
 
         # Total range-to-go (Rgo) [km]
-        axes3[2].plot(results['t'], results['Rgo']/1e3)
-        axes3[2].scatter(results['t'][idx_final], results['Rgo'][idx_final]/1e3, 
-                        color='black', s=50, zorder=5, label='Final')
-        axes3[2].annotate(f'({results["t"][idx_final]:.1f}, {results["Rgo"][idx_final]/1e3:.2f})',
-                         xy=(results['t'][idx_final], results['Rgo'][idx_final]/1e3),
-                         xytext=(10, 10), textcoords='offset points',
-                         fontsize=9, bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
+        axes3[2].plot(results['t'], results['RD_go']/1e3)
+        axes3[2].scatter(results['t'][idx_final], results['RD_go'][idx_final]/1e3, 
+                 color='black', s=50, zorder=5, label='Final')
+        axes3[2].annotate(f'({results["t"][idx_final]:.1f}, {results["RD_go"][idx_final]/1e3:.2f})',
+                  xy=(results['t'][idx_final], results['RD_go'][idx_final]/1e3),
+                  xytext=(10, 10), textcoords='offset points',
+                  fontsize=9, bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
         axes3[2].set_xlabel('Time [s]')
-        axes3[2].set_ylabel('Range-to-Go [km]')
+        axes3[2].set_ylabel('Down Range-to-Go [km]')
         axes3[2].grid(True)
-        axes3[2].axhline(y=self.target.Rgo_target/1e3, color='r', linestyle='--', label='Target limit')
-        axes3[2].legend()
+        axes3[2].axhline(y=0, color='r', linestyle='--', label='Target limit')
+        axes3[2].legend() 
 
         fig_range.tight_layout()
 
@@ -674,13 +693,14 @@ def main():
         de=10000.0,             # Energy step for propagation [J/kg]
         dsigma_deg=3.0          # Bank angle step for finite difference [deg]
     )
+    #guidance = constant_bank_guidance = ConstantBankGuidance(bank_angle_deg=-100)
     print(f"\nUsing guidance: {guidance}")
     
     # Alternative: Use constant bank guidance
     # guidance = ConstantBankGuidance(bank_angle_deg=100.0)
     
     print("\nRunning simulation...")
-    results = sim.run(start_time=0.0, stop_time=7000.0, time_step=0.01, guidance=guidance, guidance_dt=2.0)
+    results = sim.run(start_time=0.0, stop_time=7000.0, time_step=0.01, guidance=guidance, guidance_dt=1)
     
     print(f"\nSimulation completed in {results['t'][-1]:.2f} seconds")
     print(f"Final altitude: {results['h'][-1]/1e3:.2f} km")
