@@ -272,7 +272,8 @@ class LNPCGuidance(BaseGuidance):
                 break
             
             # Time step based on energy step, capped for stability
-            dt = min(de_step / e_dot, 0.5)
+            #dt = min(de_step / e_dot, 0.5)
+            dt= de_step / e_dot
             #print(f"dt={dt:.5f}s, e_dot={e_dot:.2f} J/kg/s")
             
             # Euler integration
