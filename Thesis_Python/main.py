@@ -690,7 +690,7 @@ def main():
         activation_time=175.0,  # Activate guidance after 170 seconds
         max_iter=25,            # Maximum Newton-Raphson iterations
         epsilon=100.0,          # Convergence tolerance [m]
-        de=10000.0,             # Energy step for propagation [J/kg]
+        de=10000.0,             # Energy step for propagation [J/kg] 10 KJ/kg
         dsigma_deg=3.0          # Bank angle step for finite difference [deg]
     )
     #guidance = constant_bank_guidance = ConstantBankGuidance(bank_angle_deg=-100)
@@ -707,6 +707,7 @@ def main():
     print(f"Final velocity: {results['V'][-1]:.2f} m/s")
     print(f"Final latitude: {np.rad2deg(results['phi'][-1]):.2f} deg")
     print(f"Final longitude: {np.rad2deg(results['theta'][-1]):.2f} deg")
+    print(f"Final energy : {results['energy'][-1]/1e6:.6f} MJ/kg vs Target energy: {(mars.mu/(mars.radius+target.h) - 0.5*target.V**2)/1e6:.6f} MJ/kg")
     
     # Check constraints
     print("\nConstraint Violations:")

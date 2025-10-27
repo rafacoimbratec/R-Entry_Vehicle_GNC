@@ -95,7 +95,7 @@ class LNPCGuidance(BaseGuidance):
             target.phi, target.theta, mars_radius)
         
         s_target = Rgo  # Total range-to-go [m]
-        print(f"LNPCG at t={t:.1f}s: e_current={e_current:.1f} J/kg, s_target={s_target:.1f} m", f"sigma={np.rad2deg(self.sigma_prev):.2f}°")
+        #print(f"LNPCG at t={t:.1f}s: e_current={e_current:.1f} J/kg, s_target={s_target:.1f} m", f"sigma={np.rad2deg(self.sigma_prev):.2f}°")
 
         if abs(e_current - self.e_f) <= 1.0:
             return self.sigma_f
@@ -215,8 +215,10 @@ class LNPCGuidance(BaseGuidance):
         while e < self.e_f:
             # Adaptive energy step: reduce near terminal energy for accuracy
             e_remaining = self.e_f - e
-            if e_remaining < 7000000:  # Last 7 MJ/kg
-                de_step = min(self.de, max(100.0, e_remaining / 10))
+            if e_remaining < 50000:  # Start reducing in last 50 kJ/kg
+                # Smoothly transition from self.de down to 100 J/kg
+                # This gives finer resolution as we approach terminal energy
+                de_step = max(100.0, min(self.de, e_remaining / 20))
             else:
                 de_step = self.de
             
@@ -265,7 +267,7 @@ class LNPCGuidance(BaseGuidance):
             e_dot = D * V
             #print(f"    e={e:.1f} J/kg, e_dot={e_dot:.1f} J/kg/s")
             
-            if abs(e_dot) < 1e-6:
+            if abs(e_dot) < 1e-9:
                 # Energy not changing significantly, break to avoid division issues
                 break
             
