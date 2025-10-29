@@ -629,15 +629,15 @@ class ReentrySimulation:
         axes3[1].legend()
 
         # Total range-to-go (Rgo) [km]
-        axes3[2].plot(results['t'], results['RD_go']/1e3)
-        axes3[2].scatter(results['t'][idx_final], results['RD_go'][idx_final]/1e3, 
+        axes3[2].plot(results['t'], results['Rgo']/1e3)
+        axes3[2].scatter(results['t'][idx_final], results['Rgo'][idx_final]/1e3, 
                  color='black', s=50, zorder=5, label='Final')
-        axes3[2].annotate(f'({results["t"][idx_final]:.1f}, {results["RD_go"][idx_final]/1e3:.2f})',
-                  xy=(results['t'][idx_final], results['RD_go'][idx_final]/1e3),
+        axes3[2].annotate(f'({results["t"][idx_final]:.1f}, {results["Rgo"][idx_final]/1e3:.2f})',
+                  xy=(results['t'][idx_final], results['Rgo'][idx_final]/1e3),
                   xytext=(10, 10), textcoords='offset points',
                   fontsize=9, bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
         axes3[2].set_xlabel('Time [s]')
-        axes3[2].set_ylabel('Down Range-to-Go [km]')
+        axes3[2].set_ylabel('Range-to-Go [km]')
         axes3[2].grid(True)
         axes3[2].axhline(y=0, color='r', linestyle='--', label='Target limit')
         axes3[2].legend() 

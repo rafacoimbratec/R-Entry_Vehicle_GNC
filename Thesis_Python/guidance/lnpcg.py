@@ -215,7 +215,7 @@ class LNPCGuidance(BaseGuidance):
         while e < self.e_f:
             # Adaptive energy step: reduce near terminal energy for accuracy
             e_remaining = self.e_f - e
-            if e_remaining < 50000:  # Start reducing in last 50 kJ/kg
+            if e_remaining < 100000:  # Start reducing in last 100 kJ/kg
                 # Smoothly transition from self.de down to 100 J/kg
                 # This gives finer resolution as we approach terminal energy
                 de_step = max(100.0, min(self.de, e_remaining / 20))
