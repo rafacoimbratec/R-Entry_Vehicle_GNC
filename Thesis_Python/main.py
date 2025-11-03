@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import Tuple, List
 from spherical_metrics import spherical_metrics
-from guidance import ConstantBankGuidance, LNPCGuidance
+from guidance import ConstantBankGuidance, LNPCGuidance, LNPCGuidanceLateral
 
 
 @dataclass
@@ -629,15 +629,15 @@ class ReentrySimulation:
         axes3[1].legend()
 
         # Total range-to-go (Rgo) [km]
-        axes3[2].plot(results['t'], results['Rgo']/1e3)
-        axes3[2].scatter(results['t'][idx_final], results['Rgo'][idx_final]/1e3, 
+        axes3[2].plot(results['t'], results['RD_go']/1e3)
+        axes3[2].scatter(results['t'][idx_final], results['RD_go'][idx_final]/1e3, 
                  color='black', s=50, zorder=5, label='Final')
-        axes3[2].annotate(f'({results["t"][idx_final]:.1f}, {results["Rgo"][idx_final]/1e3:.2f})',
-                  xy=(results['t'][idx_final], results['Rgo'][idx_final]/1e3),
+        axes3[2].annotate(f'({results["t"][idx_final]:.1f}, {results["RD_go"][idx_final]/1e3:.2f})',
+                  xy=(results['t'][idx_final], results['RD_go'][idx_final]/1e3),
                   xytext=(10, 10), textcoords='offset points',
                   fontsize=9, bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
         axes3[2].set_xlabel('Time [s]')
-        axes3[2].set_ylabel('Range-to-Go [km]')
+        axes3[2].set_ylabel('Downrange distance to target [km]')
         axes3[2].grid(True)
         axes3[2].axhline(y=0, color='r', linestyle='--', label='Target limit')
         axes3[2].legend() 
@@ -684,10 +684,10 @@ def main():
     print(f"\nInitial Range-to-Go: {Rgo/1e3:.2f} km")
     
     # Create LNPCG guidance
-    guidance = LNPCGuidance(
-        sigma_f_deg=10.0,        # Final bank angle at terminal energy [deg]
+    guidance = LNPCGuidanceLateral(
+        sigma_f_deg=40.0,        # Final bank angle at terminal energy [deg]
         e_f=mars.mu/(mars.radius+target.h) - 0.5*target.V**2,  # Terminal energy [J/kg]
-        activation_time=170.0,  # Activate guidance after 170 seconds
+        activation_time=175.0,  # Activate guidance after 170 seconds
         max_iter=25,            # Maximum Newton-Raphson iterations
         epsilon=100.0,          # Convergence tolerance [m]
         de=10000.0,             # Energy step for propagation [J/kg] 10 KJ/kg

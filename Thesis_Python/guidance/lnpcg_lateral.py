@@ -11,7 +11,7 @@ import numpy as np
 from .base_guidance import BaseGuidance
 
 
-class LNPCGuidance(BaseGuidance):
+class LNPCGuidanceLateral(BaseGuidance):
     """
     Linear Numerical Predictor-Corrector Guidance
     
@@ -29,7 +29,8 @@ class LNPCGuidance(BaseGuidance):
                  max_iter: int = 50,
                  epsilon: float = 100.0,
                  de: float = 10000.0,
-                 dsigma_deg: float = 3.0):
+                 dsigma_deg: float = 3.0,
+                 K_reasonable: float = 1.5):
         """
         Initialize LNPCG guidance
         
@@ -55,6 +56,22 @@ class LNPCGuidance(BaseGuidance):
         # Initial guess for bank angle (will be updated during flight)
         self.sigma0_guess = np.deg2rad(100.0)
         self.sigma_prev = 0.0
+        
+        # Lateral predictive switching state
+        self.n_reversals_allowed = 4  # default max reversals
+        self.n_reversals_remain = self.n_reversals_allowed
+        self.hysteresis = 0.05  # 5% hysteresis
+        self.k_min = 0.5
+        self.k_max = 5.0
+        self.min_dwell = 5.0  # seconds between reversals
+        self.last_reverse_time = -1e9
+        self.last_update_time = -1e9
+        # Max bank rate [rad/s]
+        self.max_bank_rate = np.deg2rad(10.0)  # 10 deg/s default
+        self._eps_small = 1e-6
+        # Autonomy init flag and reasonable K for n0 calc
+        self.K_reasonable = max(1.01, float(K_reasonable))
+        self._auton_initialized = False
       
     def compute_bank_angle(self, t: float, state, target, mars_radius: float, **kwargs) -> float:
         """
@@ -130,7 +147,6 @@ class LNPCGuidance(BaseGuidance):
         
         # Use midpoint of bracket as initial guess
         sigma0_current = (sigma_low + sigma_high) / 2.0
-        #sigma0_current = self.sigma0_guess
 
         for k in range(self.max_iter):
             # Predict surface distance at current sigma0
@@ -160,26 +176,118 @@ class LNPCGuidance(BaseGuidance):
         
         # Update guess for next iteration
         self.sigma0_guess = sigma0_current
-        
-        # Compute linear bank profile: sigma_cmd = sigma0 + (e-e0)/(ef-e0)*(sigmaf-sigma0)
-        # At current time: e = e_current, so this gives the current commanded bank angle
-        # Note: sigma0 is found at e0 = e_current, so at this instant sigma_cmd = sigma0
-        # But we store sigma0 as the "initial" value of the linear profile
-        sigma_cmd = sigma0_current + (e_current - e_current) / (self.e_f - e_current) * \
-                    (self.sigma_f - sigma0_current)
-        
-        # This simplifies to sigma_cmd = sigma0_current (since (e_current - e_current) = 0)
-        # The linear profile will be used in the propagator where e evolves
-        #sigma_cmd = sigma0_current
-        
-        # Clip to [-π, π]
-        sigma_cmd = np.clip(sigma_cmd, -np.pi, np.pi)
-        # Store for fallback
+
+        # Compute nominal (unsigned) bank magnitude using the longitudinal solver
+        sigma_mag = abs(sigma0_current)
+
+        # ---- Lateral predictive switching logic ----
+        # Compute current cross-range (chi_current) from entry to current state
+        from spherical_metrics import spherical_metrics
+        initial_phi = np.deg2rad(-21.3)
+        initial_theta = np.deg2rad(-176.40167)
+        d, sin_d, cos_d, RC_curr, RD_curr, RD_go_curr, Rgo_curr = spherical_metrics(
+            initial_phi, initial_theta, state.phi, state.theta, target.phi, target.theta, mars_radius)
+        chi_current = RC_curr  # meters (signed magnitude returned by spherical_metrics)
+
+        # Initialize autonomous n0 based on a reasonable K (if not done yet)
+        if not getattr(self, '_auton_initialized', False):
+            # Use a predictor with a representative signed bank to estimate initial terminal cross-range
+            sign_guess = 1.0 if abs(self.sigma_prev) < self._eps_small else np.sign(self.sigma_prev)
+            try:
+                s0, theta0, phi0 = self._propagate_energy(state, sign_guess * sigma_mag,
+                                                          atmosphere, mu, mars_radius, e_current,
+                                                          constant_bank=True, return_final=True)
+                _, _, _, RC0, _, _, _ = spherical_metrics(initial_phi, initial_theta, phi0, theta0,
+                                                        target.phi, target.theta, mars_radius)
+                chi0 = abs(RC0)
+            except Exception:
+                # Fallback: use current cross-range as estimate
+                chi0 = abs(chi_current)
+
+            chi_f_init = getattr(target, 'Rgo_target', 5e3)
+            if chi0 <= chi_f_init or self.K_reasonable <= 1.0:
+                n0 = 0
+            else:
+                ratio0 = chi0 / max(chi_f_init, 1e-9)
+                n0 = int(np.ceil(np.log(ratio0) / np.log(self.K_reasonable)))
+                n0 = max(0, n0)
+
+            # Set allowed and remaining reversals
+            self.n_reversals_allowed = n0
+            self.n_reversals_remain = n0
+            self._auton_initialized = True
+            # Optional: print diagnostic
+            #print(f"Auton init: chi0={chi0:.1f} m, chi_f={chi_f_init:.1f} m, K={self.K_reasonable:.2f} -> n0={n0}")
+
+        # Terminal cross-range tolerance
+        chi_f = 0.01*1000.0  # 1% of 1 km = 10 m default
+
+        # If within tolerance or no reversals left, keep current sign
+        if self.n_reversals_remain <= 0 or abs(chi_current) < chi_f:
+            desired_sign = np.sign(self.sigma_prev) if abs(self.sigma_prev) > self._eps_small else 1.0
+        else:
+            # Run longitudinal predictor twice with constant bank sign (no modeled reversals)
+            # Predictor returns final lat/lon when constant_bank=True and return_final=True
+            # Predict with current sign (+)
+            sign_current = 1.0 if np.sign(self.sigma_prev) >= 0 else -1.0
+            if abs(self.sigma_prev) < self._eps_small:
+                # If previous sign is zero, assume +1
+                sign_current = 1.0
+
+            # Predict terminal cross-range for same sign and opposite sign
+            s_pos, theta_pos, phi_pos = self._propagate_energy(state, sign_current * sigma_mag,
+                                                               atmosphere, mu, mars_radius, e_current,
+                                                               constant_bank=True, return_final=True)
+            s_neg, theta_neg, phi_neg = self._propagate_energy(state, -sign_current * sigma_mag,
+                                                               atmosphere, mu, mars_radius, e_current,
+                                                               constant_bank=True, return_final=True)
+
+            # Compute predicted cross-range (absolute) at terminal for both scenarios
+            _, _, _, RC_pos, _, _, _ = spherical_metrics(initial_phi, initial_theta, phi_pos, theta_pos,
+                                                        target.phi, target.theta, mars_radius)
+            _, _, _, RC_neg, _, _, _ = spherical_metrics(initial_phi, initial_theta, phi_neg, theta_neg,
+                                                        target.phi, target.theta, mars_radius)
+
+            chi_pos = abs(RC_pos)
+            chi_neg = abs(RC_neg)
+            print(f"Predictor: chi_current={chi_current:.1f} m, chi_pos={chi_pos:.1f} m, chi_neg={chi_neg:.1f} m")
+
+            # If opposite prediction is approximately zero, treat ratio as infinite and reverse now
+            if chi_neg < 1e-3:
+                ratio = np.inf
+            else:
+                ratio = abs(chi_current) / chi_neg
+
+            # Remaining reversals
+            n = max(1, self.n_reversals_remain)
+            # Gain K
+            K = (abs(chi_current) / max(chi_f, 1e-9)) ** (1.0 / n)
+            K = max(self.k_min, min(self.k_max, K))
+
+            # Decision: reverse if current/opposite > K*(1+hyst) and dwell time passed
+            if ratio > K * (1.0 + self.hysteresis):
+                # Reverse (flip sign)
+                desired_sign = -sign_current
+                # decrement remaining reversals
+                self.n_reversals_remain = max(0, self.n_reversals_remain - 1)
+                self.last_reverse_time = t
+            else:
+                desired_sign = sign_current
+
+        # Compose desired bank (signed)
+        desired_sigma = desired_sign * sigma_mag
+
+        # Simplified: directly command desired sign (no rate limiting)
+        sigma_cmd = np.clip(desired_sigma, -np.pi, np.pi)
+
+        # Update internal state
         self.sigma_prev = sigma_cmd
-        
+        self.last_update_time = t
+
         return sigma_cmd
     
-    def _propagate_energy(self, state, sigma0, atmosphere, mu, mars_radius, e0):
+    def _propagate_energy(self, state, sigma0, atmosphere, mu, mars_radius, e0,
+                          constant_bank: bool = False, return_final: bool = False):
         """
         Propagate trajectory using energy as independent variable
         
@@ -200,7 +308,7 @@ class LNPCGuidance(BaseGuidance):
         omega = 7.088e-5  # Mars rotation rate [rad/s]
         
         s_pred = 0.0
-        
+
         # Unpack state
         r = state.r
         theta = state.theta
@@ -223,9 +331,12 @@ class LNPCGuidance(BaseGuidance):
             else:
                 de_step = self.de
             
-            # Linear bank profile
-            den = max(1e-9, (self.e_f - e0))
-            sigma = sigma0 + (e - e0) / den * (self.sigma_f - sigma0)
+            # Bank profile: linear unless constant_bank is requested
+            if constant_bank:
+                sigma = sigma0
+            else:
+                den = max(1e-9, (self.e_f - e0))
+                sigma = sigma0 + (e - e0) / den * (self.sigma_f - sigma0)
             #print(sigma)
             
             # Atmosphere
@@ -295,6 +406,8 @@ class LNPCGuidance(BaseGuidance):
             if r < mars_radius:
                 break
         
+        if return_final:
+            return s_pred, theta, phi
         return s_pred
     
     def reset(self):
