@@ -684,16 +684,16 @@ def main():
     print(f"\nInitial Range-to-Go: {Rgo/1e3:.2f} km")
     
     # Create LNPCG guidance
-    guidance = LNPCGuidanceLateral(
-        sigma_f_deg=40.0,        # Final bank angle at terminal energy [deg]
-        e_f=mars.mu/(mars.radius+target.h) - 0.5*target.V**2,  # Terminal energy [J/kg]
-        activation_time=175.0,  # Activate guidance after 170 seconds
-        max_iter=25,            # Maximum Newton-Raphson iterations
-        epsilon=100.0,          # Convergence tolerance [m]
-        de=10000.0,             # Energy step for propagation [J/kg] 10 KJ/kg
-        dsigma_deg=3.0          # Bank angle step for finite difference [deg]
-    )
-    #guidance = constant_bank_guidance = ConstantBankGuidance(bank_angle_deg=-100)
+    #guidance = LNPCGuidance(
+        #sigma_f_deg=40.0,        # Final bank angle at terminal energy [deg]
+        #e_f=mars.mu/(mars.radius+target.h) - 0.5*target.V**2,  # Terminal energy [J/kg]
+        #activation_time=175.0,  # Activate guidance after 170 seconds
+        #max_iter=25,            # Maximum Newton-Raphson iterations
+        #epsilon=100.0,          # Convergence tolerance [m]
+        #de=10000.0,             # Energy step for propagation [J/kg] 10 KJ/kg
+        #dsigma_deg=3.0          # Bank angle step for finite difference [deg]
+    #)
+    guidance = constant_bank_guidance = ConstantBankGuidance(bank_angle_deg=100)
     print(f"\nUsing guidance: {guidance}")
     
     # Alternative: Use constant bank guidance
