@@ -41,21 +41,21 @@ class MarsConstants:
 
 @dataclass
 class VehicleProperties:
-    L_over_D: float = 0.54          # nominal L/D
-    beta: float = 354.0             # [kg/m^2] ballistic coefficient
+    L_over_D: float = 0.24          # nominal L/D
+    beta: float = 135.0             # [kg/m^2] ballistic coefficient
     # Heating correlation (monitoring only)
     N: float = 0.5
-    M: float = 3.15
+    M: float = 3
     k_heat_flux: float = 5.3697e-5  # SI -> W/m^2 with rho^N * V^M
 
 @dataclass
 class InitialConditions:
-    h: float = 125e3
-    theta: float = -176.40167 * np.pi/180
-    phi: float = -21.3 * np.pi/180
-    V: float = 4700.0
-    gamma: float = -10.0 * np.pi/180
-    psi: float = -2.8758 * np.pi/180
+    h: float = 120e3
+    theta: float = -176.40167 * np.pi/180  # Initial longitude [rad]
+    phi: float = -21.3 * np.pi/180  # Initial latitude [rad]
+    V: float = 4700
+    gamma: float = -15.0 * np.pi/180
+    psi: float = -2.8758 * np.pi/180  # Initial heading angle [rad]
 
 @dataclass
 class TargetConditions:
@@ -67,7 +67,7 @@ class TargetConditions:
 
 @dataclass
 class PathConstraints:
-    A_max: float = 4.0          # [g] converted inside if needed
+    A_max: float = 5.0          # [g] converted inside if needed
     q_max: float = 13e3         # [Pa]
     Qdot_max: float = 500e3     # [W/m^2]
 
@@ -204,7 +204,7 @@ class ReentrySimulation:
             res["Mach"][i] = state.V / max(a, 1e-6)
 
             # stop at deploy (NEW RULE): V <= 450 m/s OR h <= 6000 m
-            if (state.V <= 450.0) or (state.h <= 6000.0):
+            if state.h <= 0.0:
                 #print(f"Deploy condition met at t={ti:.1f} s: V={state.V:.1f} m/s, h={state.h:.1f} m")
                 for k in res:
                     res[k] = res[k][:i+1]
@@ -214,30 +214,6 @@ class ReentrySimulation:
             state = self.dyn.rk4_step(state, sigma, time_step)
 
         return res
-
-# -----------------------
-# Spherical metrics (downrange/crossrange/Rgo)
-# -----------------------
-def spherical_metrics(lat0, lon0, lat, lon, lat_t, lon_t, Rplanet):
-    def clamp(x, lo=-1.0, hi=1.0): return np.clip(x, lo, hi)
-    def sph2cart(lat_, lon_):
-        return np.array([np.cos(lat_)*np.cos(lon_), np.cos(lat_)*np.sin(lon_), np.sin(lat_)])
-    cos_d = np.sin(lat0)*np.sin(lat) + np.cos(lat0)*np.cos(lat)*np.cos(lon - lon0)
-    cos_d = clamp(cos_d); d = np.arccos(cos_d); sin_d = np.sqrt(max(0.0, 1.0 - cos_d**2))
-    rE, rP, rT = sph2cart(lat0, lon0), sph2cart(lat, lon), sph2cart(lat_t, lon_t)
-    nOET = np.cross(rE, rT); nOET = nOET/np.linalg.norm(nOET)
-    nOEP = np.cross(rE, rP); nrm = np.linalg.norm(nOEP)
-    nOEP = nOET if nrm < 1e-12 else nOEP/nrm
-    iang = np.arccos(clamp(np.dot(nOEP, nOET)))
-    RC_ang = np.arcsin(clamp(np.sin(iang) * sin_d))
-    cos_RC = np.cos(RC_ang); denom = np.sign(cos_RC)*np.maximum(np.abs(cos_RC), 1e-12)
-    RD_ang = np.arccos(clamp(cos_d / denom))
-    cos_dt = np.sin(lat0)*np.sin(lat_t) + np.cos(lat0)*np.cos(lat_t)*np.cos(lon_t - lon0)
-    RD_tot_ang = np.arccos(clamp(cos_dt / denom))
-    RD_go = (RD_tot_ang - RD_ang) * Rplanet
-    Rgo   = np.sqrt(RD_go**2 + (RC_ang * Rplanet)**2)
-    RC, RD = RC_ang * Rplanet, RD_ang * Rplanet
-    return d*Rplanet, sin_d, cos_d, RC, RD, RD_go, Rgo
 
 # -----------------------
 # Bank-schedule guidance (vertical L/D vs speed)
@@ -262,293 +238,294 @@ class BankScheduleGuidance:
         #print(f"t={t:.1f} s, V={state.V:.1f} m/s, LDv={LDv_now:.3f}, bank angle σ={math.degrees(math.acos(c)):.1f} deg")
         return math.acos(c)  # [rad]
 
-# -----------------------
-# Design-map settings & sweep
-# -----------------------
-@dataclass
-class DesignMapSettings:
-    efpa_deg_grid: tuple = (-16.0, -15.0, 0.2)   # start, stop, step
-    LDv_hi_grid:  tuple = (0.1, 0.2, 0.02)
-    LDv_lo_grid:  tuple = (0.2, 0.3, 0.02)
-    V_hi: float = 5500.0
-    V_lo: float = 2000.0
-    # Filters (Table 2 style)
-    miss_km: float = 700.0
-    sat_max_frac: float = 0.25
-    mach_ref_min: float = 2.2
-    alt_rate_min: float = 0.0
-    deploy_alt_min_m: float = 600.0
-    ranoff_km: float = 5.0  # tweak per mission
-
-def _mach_from_state(atm, mars, h, V):
-    a = math.sqrt(mars.specific_heat_ratio * mars.R_s * atm.temperature(h))
-    return V / max(a, 1e-6)
-
-def _evaluate_trajectory(sim: ReentrySimulation, gobj: BankScheduleGuidance, ic_override=None):
-    # allow EFPA override
-    if ic_override is not None:
-        sim_local = ReentrySimulation(sim.mars, sim.veh, ic_override, sim.target, sim.constraints)
-    else:
-        sim_local = sim
-
-    res = sim_local.run(time_step=0.1, guidance=gobj, guidance_dt=0.5)
-
-    # --- NEW DEPLOY RULE: first time V <= 450 m/s OR h <= 6000 m
-    V_arr, h_arr = res["V"], res["h"]
-    hits = np.where((V_arr <= 450.0) | (h_arr <= 6000.0))[0]
-    if hits.size > 0:
-        idx = int(hits[0])
-    else:
-        # fallback to closest threshold
-        i_v = int(np.argmin(np.abs(V_arr - 450.0)))
-        i_h = int(np.argmin(np.abs(h_arr - 6000.0)))
-        idx = i_v if (abs(V_arr[i_v] - 450.0) <= abs(h_arr[i_h] - 6000.0)) else i_h
-
-    # metrics at deploy
-    lat_dep, lon_dep = res["phi"][idx], res["theta"][idx]
-    _, _, _, RC, RD, RD_go, Rgo = spherical_metrics(
-        sim.ic.phi, sim.ic.theta, lat_dep, lon_dep, sim.target.phi, sim.target.theta, sim.mars.radius
-    )
-    miss_km = abs(Rgo)/1000.0
-    range_flown_km = RD/1000.0
-    alt_rate = res["V"][idx] * np.sin(res["gamma"][idx])    # dh/dt
-    M = _mach_from_state(sim.atm, sim.mars, res["h"][idx], res["V"][idx])
-
-    # saturation fraction: when LDv hits +/- LD_nom (acos arg -> ±1)
-    LD_nom = sim.veh.L_over_D
-    sigma = res["sigma"]
-    LDv = LD_nom * np.cos(sigma)
-    sat_frac = float(np.mean(np.isclose(np.abs(LDv), LD_nom, atol=1e-6)))
-
-    out = {
-        "idx": idx,
-        "deploy_alt_m": res["h"][idx],
-        "deploy_speed_mps": res["V"][idx],
-        "deploy_mach": M,
-        "miss_km": miss_km,
-        "range_flown_km": range_flown_km,
-        "alt_rate_ms": alt_rate,
-        "sat_frac": sat_frac
-    }
-    print(f"Evaluated trajectory: deploy_mach={out['deploy_mach']:.2f}, deploy_alt_km={out['deploy_alt_m']*1e-3:.1f} km, miss={out['miss_km']:.2f} km, range_flown={out['range_flown_km']:.2f} km, alt_rate={out['alt_rate_ms']:.1f} m/s, sat_frac={out['sat_frac']:.3f}")
-    return out, res
-
-def design_map_sweep(sim: ReentrySimulation, s: DesignMapSettings) -> pd.DataFrame:
-    efpas = np.arange(s.efpa_deg_grid[0], s.efpa_deg_grid[1] + 1e-9, s.efpa_deg_grid[2])
-    LDv_hi_list = np.arange(s.LDv_hi_grid[0], s.LDv_hi_grid[1] + 1e-9, s.LDv_hi_grid[2])
-    LDv_lo_list = np.arange(s.LDv_lo_grid[0], s.LDv_lo_grid[1] + 1e-9, s.LDv_lo_grid[2])
-
-    rows = []
-    # baseline entry->target downrange for "required range": baseline + ranoff + 5 km
-    _, _, _, _, RD_base, _, _ = spherical_metrics(sim.ic.phi, sim.ic.theta, sim.ic.phi, sim.ic.theta,
-                                                  sim.target.phi, sim.target.theta, sim.mars.radius)
-    #required_range_km_base = RD_base/1000.0 + s.ranoff_km + 5.0
-
-    for efpa_deg in efpas:
-        ic_mod = InitialConditions(h=sim.ic.h, theta=sim.ic.theta, phi=sim.ic.phi,
-                                   V=sim.ic.V, gamma=np.deg2rad(efpa_deg), psi=sim.ic.psi)
-
-        for ldv_hi in LDv_hi_list:
-            for ldv_lo in LDv_lo_list:
-                if ldv_lo > ldv_hi:
-                    continue
-                g = BankScheduleGuidance(sim.veh.L_over_D, s.V_hi, s.V_lo, ldv_hi, ldv_lo)
-
-                # reference run
-                met_ref, res_ref = _evaluate_trajectory(sim, g, ic_override=ic_mod)
-
-                # filters on reference
-                ref_ok = ((met_ref["deploy_alt_m"])>= s.deploy_alt_min_m) and \
-                         (met_ref["deploy_mach"] >= s.mach_ref_min) #and \
-                         #(met_ref["range_flown_km"] >= required_range_km_base)
-
-                # stress cases: EFPA ±0.2 deg for saturation max
-                sat_max = met_ref["sat_frac"]
-                for dEFPA in (-0.2, +0.2):
-                    ic_stress = InitialConditions(h=sim.ic.h, theta=sim.ic.theta, phi=sim.ic.phi,
-                                                  V=sim.ic.V, gamma=np.deg2rad(efpa_deg + dEFPA), psi=sim.ic.psi)
-                    met_st, _ = _evaluate_trajectory(sim, g, ic_override=ic_stress)
-                    sat_max = max(sat_max, met_st["sat_frac"])
-
-                pass_all = ref_ok and \
-                           (met_ref["miss_km"] <= s.miss_km) and \
-                           (sat_max <= s.sat_max_frac) and \
-                           ((met_ref["alt_rate_ms"]*-1) >= s.alt_rate_min)
-
-                rows.append({
-                    "efpa_deg": efpa_deg,
-                    "LDv_hi": ldv_hi,
-                    "LDv_lo": ldv_lo,
-                    "deploy_alt_m": met_ref["deploy_alt_m"],
-                    "deploy_mach": met_ref["deploy_mach"],
-                    "miss_km": met_ref["miss_km"],
-                    "range_flown_km": met_ref["range_flown_km"],
-                    "alt_rate_ms": met_ref["alt_rate_ms"],
-                    "sat_frac_max": sat_max,
-                    #"required_range_km": required_range_km_base,
-                    "PASS": bool(pass_all)
-                })
-                #print(bool(pass_all))
-                #print("Candidate didn't meet because: " +
-                      #("" if ref_ok else " Reference failed;") +
-                      #("" if (met_ref["miss_km"] <= s.miss_km) else " Miss distance exceeded;") +
-                      #("" if (sat_max <= s.sat_max_frac) else " Saturation fraction exceeded;") +
-                      #("" if ((met_ref["alt_rate_ms"]*-1) >= s.alt_rate_min) else " Altitude rate exceeded;"))
-                #print("" if pass_all else "Candidate PASSED all filters!")
-
-    df = pd.DataFrame(rows)
-    if (df["PASS"] == True).any():
-        best = df[df["PASS"] == True].sort_values("deploy_alt_m", ascending=False).iloc[0]
-        print("\nSelected reference (max deploy altitude among PASS):\n")
-        print(best.to_string())
-    else:
-        print("\nNo candidate passed all filters. Consider adjusting grids or thresholds.\n")
-    return df
-
-# =======================
-# Plotting for candidate
-# =======================
-
-def _deploy_index_from_rule(res):
-    V_arr, h_arr = res["V"], res["h"]
-    idxs = np.where((V_arr <= 450.0) | (h_arr <= 6000.0))[0]
-    if idxs.size > 0:
-        return int(idxs[0])
-    # fallback to nearest threshold if never crossed
-    i_v = int(np.argmin(np.abs(V_arr - 450.0)))
-    i_h = int(np.argmin(np.abs(h_arr - 6000.0)))
-    return i_v if (abs(V_arr[i_v] - 450.0) <= abs(h_arr[i_h] - 6000.0)) else i_h
-
-def _downrange_from_entry(sim, res):
-    # great-circle downrange from entry to current (meters)
-    dr = np.zeros_like(res["t"])
-    for i in range(len(res["t"])):
-        _, _, _, _, RD, _, _ = spherical_metrics(
-            sim.ic.phi, sim.ic.theta,
-            res["phi"][i], res["theta"][i],
-            sim.target.phi, sim.target.theta,
-            sim.mars.radius
-        )
-        dr[i] = RD
-    return dr
-
-def plot_candidate_trajectory(sim, efpa_deg, LDv_hi, LDv_lo, V_hi=5500.0, V_lo=2000.0, save_csv=True):
-    """Re-simulates the chosen candidate and produces plots."""
-    ic_mod = InitialConditions(h=sim.ic.h, theta=sim.ic.theta, phi=sim.ic.phi,
-                               V=sim.ic.V, gamma=np.deg2rad(efpa_deg), psi=sim.ic.psi)
-    sim_local = ReentrySimulation(sim.mars, sim.veh, ic_mod, sim.target, sim.constraints)
-    g = BankScheduleGuidance(sim.veh.L_over_D, V_hi, V_lo, LDv_hi, LDv_lo)
-
-    res = sim_local.run(time_step=0.1, guidance=g, guidance_dt=0.5)
-    idx_dep = _deploy_index_from_rule(res)
-    t = res["t"]
-    dr_km = _downrange_from_entry(sim_local, res) / 1000.0
-
-    if save_csv:
-        # Save trajectory for reference
-        traj = pd.DataFrame({
-            "t_s": t,
-            "alt_m": res["h"],
-            "downrange_km": dr_km,
-            "V_mps": res["V"],
-            "gamma_deg": np.degrees(res["gamma"]),
-            "q_Pa": res["q"],
-            "Qdot_Wm2": res["Qdot"],
-            "sigma_deg": np.degrees(res["sigma"]),
-            "Mach": res["Mach"],
-            "lat_deg": np.degrees(res["phi"]),
-            "lon_deg": np.degrees(res["theta"]),
-        })
-        traj.to_csv("selected_candidate_trajectory.csv", index=False)
-        print("Saved: selected_candidate_trajectory.csv")
-
-    # ------ Plots ------
-    # 1) Altitude vs Downrange
-    plt.figure()
-    plt.plot(dr_km, res["h"]/1000.0)
-    plt.plot(dr_km[idx_dep], res["h"][idx_dep]/1000.0, "o")
-    plt.xlabel("Downrange [km]")
-    plt.ylabel("Altitude [km]")
-    plt.title("Altitude vs Downrange (selected candidate)")
-    plt.grid(True)
-
-    # 2) Speed vs Time
-    plt.figure()
-    plt.plot(t, res["V"])
-    plt.plot(t[idx_dep], res["V"][idx_dep], "o")
-    plt.xlabel("Time [s]")
-    plt.ylabel("Speed [m/s]")
-    plt.title("Speed vs Time")
-    plt.grid(True)
-
-    # 3) Flight-path angle vs Time
-    plt.figure()
-    plt.plot(t, np.degrees(res["gamma"]))
-    plt.plot(t[idx_dep], np.degrees(res["gamma"][idx_dep]), "o")
-    plt.xlabel("Time [s]")
-    plt.ylabel("FPA γ [deg]")
-    plt.title("Flight-Path Angle vs Time")
-    plt.grid(True)
-
-    # 4) Dynamic pressure vs Time
-    plt.figure()
-    plt.plot(t, res["q"])
-    plt.plot(t[idx_dep], res["q"][idx_dep], "o")
-    plt.xlabel("Time [s]")
-    plt.ylabel("Dynamic pressure q [Pa]")
-    plt.title("Dynamic Pressure vs Time")
-    plt.grid(True)
-
-    # 5) Stagnation heat rate vs Time
-    plt.figure()
-    plt.plot(t, res["Qdot"])
-    plt.plot(t[idx_dep], res["Qdot"][idx_dep], "o")
-    plt.xlabel("Time [s]")
-    plt.ylabel("Stagnation heat rate [W/m$^2$]")
-    plt.title("Sutton–Graves Heat Rate vs Time")
-    plt.grid(True)
-
-    # 6) Bank angle vs Time
-    plt.figure()
-    plt.plot(t, np.degrees(res["sigma"]))
-    plt.plot(t[idx_dep], np.degrees(res["sigma"][idx_dep]), "o")
-    plt.xlabel("Time [s]")
-    plt.ylabel("Bank angle σ [deg]")
-    plt.title("Bank Angle vs Time")
-    plt.grid(True)
-
-    # 7) Mach vs Time
-    plt.figure()
-    plt.plot(t, res["Mach"])
-    plt.plot(t[idx_dep], res["Mach"][idx_dep], "o")
-    plt.xlabel("Time [s]")
-    plt.ylabel("Mach [-]")
-    plt.title("Mach vs Time")
-    plt.grid(True)
-
-    plt.show()
-    return res
-
-def plot_best_from_dataframe(sim, df, settings):
-    """Pick the best PASS from df and plot it."""
-    df_pass = df[df["PASS"] == True]
-    if df_pass.empty:
-        print("No PASS candidates to plot.")
-        return None
-    best = df_pass.sort_values("deploy_alt_m", ascending=False).iloc[0]
-    print("\nPlotting selected candidate:")
-    print(best.to_string())
-    return plot_candidate_trajectory(sim,
-                                     efpa_deg=best["efpa_deg"],
-                                     LDv_hi=best["LDv_hi"],
-                                     LDv_lo=best["LDv_lo"],
-                                     V_hi=settings.V_hi,
-                                     V_lo=settings.V_lo)
+# (Removed legacy design-map and candidate plotting helpers to keep this
+# module focused on the EFPA/LDv constraint sweep and plotting utilities.)
 
 
 # -----------------------
 # Run sweep
 # -----------------------
+def _expand_range_or_list(x):
+    """If x is a 3-tuple (start, stop, step) return np.arange, otherwise
+    convert to list and return as-is."""
+    if x is None:
+        return []
+    if isinstance(x, (list, tuple)) and len(x) == 3 and all(isinstance(v, (int, float)) for v in x):
+        return list(np.arange(x[0], x[1] + 1e-9, x[2]))
+    # otherwise assume iterable of values
+    return list(x)
+
+
+def run_constraint_sweep(sim: ReentrySimulation,
+                         efpa_grid=(-16.0, -15.0, 0.2),
+                         early_bank_deg=(45, 115, 10),
+                         early_V=(4500, 6000, 500),
+                         late_bank_deg=(40, 60, 5),
+                         late_V=(2000, 3500, 250),
+                         time_step=0.1, guidance_dt=0.5,
+                         out_csv="efpa_bank_constraint_sweep.csv"):
+    """Simplified sweep: for each EFPA and LDv pair, simulate using the existing
+    BankScheduleGuidance and report whether the resulting bank(t) trajectory
+    respects q, A_g and Qdot constraints in sim.constraints.
+
+    Keeps the original bank-angle method unchanged and eliminates unrelated
+    design-map filtering/plotting for a focused test.
+    """
+    efpas = np.arange(efpa_grid[0], efpa_grid[1] + 1e-9, efpa_grid[2])
+    # interpret bank-angle ranges (deg) and velocity ranges
+    early_bank_list = _expand_range_or_list(early_bank_deg)
+    late_bank_list = _expand_range_or_list(late_bank_deg)
+    early_V_list = _expand_range_or_list(early_V)
+    late_V_list = _expand_range_or_list(late_V)
+
+    # convert bank angles (deg) to LDv values using LD_nom * cos(bank_rad)
+    LD_nom = float(sim.veh.L_over_D)
+    LDv_hi_vals = [LD_nom * math.cos(math.radians(b)) for b in early_bank_list]
+    LDv_lo_vals = [LD_nom * math.cos(math.radians(b)) for b in late_bank_list]
+
+    rows = []
+    runs = []
+    for efpa_deg in efpas:
+        for LDv_hi in LDv_hi_vals:
+            for V_hi in early_V_list:
+                for LDv_lo in LDv_lo_vals:
+                    for V_lo in late_V_list:
+                        # build IC with requested EFPA
+                        ic_mod = InitialConditions(h=sim.ic.h, theta=sim.ic.theta, phi=sim.ic.phi,
+                                                   V=sim.ic.V, gamma=np.deg2rad(efpa_deg), psi=sim.ic.psi)
+                        sim_local = ReentrySimulation(sim.mars, sim.veh, ic_mod, sim.target, sim.constraints)
+                        g = BankScheduleGuidance(sim.veh.L_over_D, V_hi, V_lo, LDv_hi, LDv_lo)
+
+                        res = sim_local.run(time_step=time_step, guidance=g, guidance_dt=guidance_dt)
+                        if len(res["t"]) == 0:
+                            # no integration, treat as fail
+                            max_q = float('nan'); max_A = float('nan'); max_Qdot = float('nan')
+                            pass_q = pass_A = pass_Qdot = False
+                        else:
+                            max_q = float(np.max(res["q"]))
+                            max_A = float(np.max(res["A"]))
+                            max_Qdot = float(np.max(res["Qdot"]))
+                            pass_q = (max_q <= sim.constraints.q_max)
+                            pass_A = (max_A <= sim.constraints.A_max)
+                            pass_Qdot = (max_Qdot <= sim.constraints.Qdot_max)
+
+                        # compute a normalized constraint score (lower is better)
+                        try:
+                            score = (max_q / sim.constraints.q_max) + (max_A / sim.constraints.A_max) + (max_Qdot / sim.constraints.Qdot_max)
+                        except Exception:
+                            score = float('nan')
+
+                        rows.append({
+                            "efpa_deg": efpa_deg,
+                            "LDv_hi": LDv_hi,
+                            "LDv_lo": LDv_lo,
+                            "V_hi": V_hi,
+                            "V_lo": V_lo,
+                            "max_q_Pa": max_q,
+                            "max_A_g": max_A,
+                            "max_Qdot_Wm2": max_Qdot,
+                            "score": score,
+                            "PASS_q": bool(pass_q),
+                            "PASS_A_g": bool(pass_A),
+                            "PASS_Qdot": bool(pass_Qdot),
+                            "PASS_all": bool(pass_q and pass_A and pass_Qdot)
+                        })
+
+                        runs.append({
+                            "efpa_deg": efpa_deg,
+                            "LDv_hi": LDv_hi,
+                            "LDv_lo": LDv_lo,
+                            "V_hi": V_hi,
+                            "V_lo": V_lo,
+                            "res": res,
+                            "PASS_all": bool(pass_q and pass_A and pass_Qdot),
+                            "score": score
+                        })
+                        #print(f"Run EFPA={efpa_deg}°, LDv_hi={LDv_hi}, LDv_lo={LDv_lo} -> ")
+
+    df = pd.DataFrame(rows)
+    n_pass = int(df["PASS_all"].sum())
+
+    # If score is available, save only the best (lowest) scoring run to CSV
+    if "score" in df.columns and not df["score"].isnull().all():
+        df_valid = df.dropna(subset=["score"])
+        if not df_valid.empty:
+            best_idx = df_valid["score"].idxmin()
+            best_row = df_valid.loc[[best_idx]]
+            best_row.to_csv(out_csv, index=False)
+            print(f"Constraint sweep complete: {len(df)} runs, {n_pass} passed all constraints. Saved best run to: {out_csv}")
+            return df, runs
+    # fallback: save entire dataframe if no score column
+    df.to_csv(out_csv, index=False)
+    print(f"Constraint sweep complete: {len(df)} runs, {n_pass} passed all constraints. Saved: {out_csv}")
+    return df, runs
+
+
+def run_efpa_family(sim: ReentrySimulation, efpa_grid, V_hi, V_lo, LDv_hi, LDv_lo, time_step=0.1, guidance_dt=0.5):
+    """Run all EFPA values while keeping bank schedule fixed (V_hi/V_lo and LDv_hi/LDv_lo).
+    Returns list of run dicts similar to sweep runs (with res and PASS_all).
+    """
+    efpas = np.arange(efpa_grid[0], efpa_grid[1] + 1e-9, efpa_grid[2])
+    runs = []
+    for efpa_deg in efpas:
+        ic_mod = InitialConditions(h=sim.ic.h, theta=sim.ic.theta, phi=sim.ic.phi,
+                                   V=sim.ic.V, gamma=np.deg2rad(efpa_deg), psi=sim.ic.psi)
+        sim_local = ReentrySimulation(sim.mars, sim.veh, ic_mod, sim.target, sim.constraints)
+        g = BankScheduleGuidance(sim.veh.L_over_D, V_hi, V_lo, LDv_hi, LDv_lo)
+        res = sim_local.run(time_step=time_step, guidance=g, guidance_dt=guidance_dt)
+        if len(res["t"]) == 0:
+            max_q = float('nan'); max_A = float('nan'); max_Qdot = float('nan')
+            pass_q = pass_A = pass_Qdot = False
+        else:
+            max_q = float(np.max(res["q"]))
+            max_A = float(np.max(res["A"]))
+            max_Qdot = float(np.max(res["Qdot"]))
+            pass_q = (max_q <= sim.constraints.q_max)
+            pass_A = (max_A <= sim.constraints.A_max)
+            pass_Qdot = (max_Qdot <= sim.constraints.Qdot_max)
+        try:
+            score = (max_q / sim.constraints.q_max) + (max_A / sim.constraints.A_max) + (max_Qdot / sim.constraints.Qdot_max)
+        except Exception:
+            score = float('nan')
+        runs.append({
+            "efpa_deg": efpa_deg,
+            "LDv_hi": LDv_hi,
+            "LDv_lo": LDv_lo,
+            "V_hi": V_hi,
+            "V_lo": V_lo,
+            "res": res,
+            "max_q_Pa": max_q,
+            "max_A_g": max_A,
+            "max_Qdot_Wm2": max_Qdot,
+            "PASS_all": bool(pass_q and pass_A and pass_Qdot),
+            "score": score
+        })
+    return runs
+
+
+def plot_sweep_states_and_constraints(runs, sim=None, figsize=(12,10),
+                                      states_file="efpa_states.png",
+                                      constraints_file="efpa_constraints.png",
+                                      title: str = None):
+    """Create two figures: stacked state traces and path-constraint traces.
+
+    - States figure: altitude, speed, flight-path angle, bank angle
+    - Constraints figure: q, Qdot, A (with markers at maxima)
+
+    Each run is colored by PASS_all (blue=pass, gray=fail) and labeled by EFPA/LDv.
+    """
+    if len(runs) == 0:
+        print("No runs to plot.")
+        return None
+
+    # --- States figure ---
+    state_vars = [
+        ("h", "Altitude [km]", lambda r: np.array(r)/1000.0),
+        ("V", "Speed [m/s]", lambda r: np.array(r)),
+        ("gamma", "FPA γ [deg]", lambda r: np.degrees(np.array(r))),
+        ("sigma", "Bank angle σ [deg]", lambda r: np.degrees(np.array(r)))
+    ]
+
+    fig1, axes1 = plt.subplots(len(state_vars), 1, figsize=(figsize[0], figsize[1]*0.6), sharex=True)
+    cmap = plt.get_cmap('tab10')
+    for i, run in enumerate(runs):
+        res = run.get("res")
+        if res is None:
+            continue
+        t = res["t"]
+        base_color = cmap(i % cmap.N)
+        passed = bool(run.get('PASS_all', False))
+        # passed runs colored, failed runs desaturated via alpha
+        color = base_color if passed else (*base_color[:3], 0.45)
+        lw = 1.8 if passed else 1.0
+        label = f"EFPA={run['efpa_deg']}°, LDv_hi={run['LDv_hi']}, LDv_lo={run['LDv_lo']}"
+        for ax, (var, ylabel, transform) in zip(axes1, state_vars):
+            if var not in res:
+                continue
+            y = transform(res[var])
+            ax.plot(t, y, label=label, color=color, linewidth=lw)
+            ax.set_ylabel(ylabel)
+            ax.grid(True)
+
+    axes1[-1].set_xlabel("Time [s]")
+    if title:
+        fig1.suptitle(title)
+    # do not show legend (too many traces); reserve space for title
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    fig1.savefig(states_file, dpi=150)
+    print(f"Saved states figure: {states_file}")
+
+    # --- Constraints figure ---
+    cons_vars = [
+        ("q", "Dynamic pressure q [Pa]", lambda r: np.array(r)),
+        ("Qdot", "Stagnation heat rate [W/m^2]", lambda r: np.array(r)),
+        ("A", "Acceleration [g]", lambda r: np.array(r))
+    ]
+
+    fig2, axes2 = plt.subplots(len(cons_vars), 1, figsize=(figsize[0], figsize[1]*0.6), sharex=True)
+    cmap2 = plt.get_cmap('tab10')
+    for i, run in enumerate(runs):
+        res = run.get("res")
+        if res is None:
+            continue
+        t = res["t"]
+        base_color = cmap2(i % cmap2.N)
+        passed = bool(run.get('PASS_all', False))
+        color = base_color if passed else (*base_color[:3], 0.45)
+        lw = 1.8 if passed else 1.0
+        label = f"EFPA={run['efpa_deg']}°, LDv_hi={run['LDv_hi']}, LDv_lo={run['LDv_lo']}"
+        for ax, (var, ylabel, transform) in zip(axes2, cons_vars):
+            if var not in res:
+                continue
+            y = transform(res[var])
+            ax.plot(t, y, label=label, color=color, linewidth=lw)
+            # place marker at maximum of this variable
+            try:
+                idx_max = int(np.nanargmax(y))
+                ax.plot(t[idx_max], y[idx_max], marker='o', color=base_color, markersize=5,
+                        markeredgecolor='k' if passed else None)
+            except Exception:
+                pass
+            ax.set_ylabel(ylabel)
+            ax.grid(True)
+
+    axes2[-1].set_xlabel("Time [s]")
+    if title:
+        fig2.suptitle(title)
+    # do not show legend (too many traces); reserve space for title
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    # add constraint limit lines if sim and sim.constraints provided
+    if sim is not None and hasattr(sim, 'constraints'):
+        c = sim.constraints
+        # q_max (Pa)
+        try:
+            axes2[0].axhline(c.q_max, color='k', linestyle='--', linewidth=1)
+            axes2[0].text(0.98, 0.9, f"q_max={c.q_max:.0f} Pa", transform=axes2[0].transAxes,
+                          horizontalalignment='right', fontsize='small')
+        except Exception:
+            pass
+        # Qdot_max (W/m^2)
+        try:
+            axes2[1].axhline(c.Qdot_max, color='k', linestyle='--', linewidth=1)
+            axes2[1].text(0.98, 0.9, f"Qdot_max={c.Qdot_max:.0f}", transform=axes2[1].transAxes,
+                          horizontalalignment='right', fontsize='small')
+        except Exception:
+            pass
+        # A_max (g)
+        try:
+            axes2[2].axhline(c.A_max, color='k', linestyle='--', linewidth=1)
+            axes2[2].text(0.98, 0.9, f"A_max={c.A_max:.2f} g", transform=axes2[2].transAxes,
+                          horizontalalignment='right', fontsize='small')
+        except Exception:
+            pass
+
+    fig2.savefig(constraints_file, dpi=150)
+    print(f"Saved constraints figure: {constraints_file}")
+
+    plt.show()
+    return fig1, fig2
+
+
 if __name__ == "__main__":
     mars = MarsConstants()
     veh = VehicleProperties()
@@ -558,22 +535,44 @@ if __name__ == "__main__":
 
     sim = ReentrySimulation(mars, veh, ic, tgt, cons)
 
-    settings = DesignMapSettings(
-        efpa_deg_grid=(-16.0, -15.0, 0.2),
-        LDv_hi_grid=(0.1, 0.2, 0.02),
-        LDv_lo_grid=(0.2, 0.3, 0.02),
-        V_hi=5500.0,
-        V_lo=2000.0,
-        miss_km=700.0,
-        sat_max_frac=0.25,
-        mach_ref_min=2.2,
-        alt_rate_min=0.0,
-        deploy_alt_min_m=600.0,
-        ranoff_km=5.0
+    # Run the requested broader sweep (note: this can be computationally heavy)
+    df, runs = run_constraint_sweep(
+        sim,
+        efpa_grid=(-16, -12.0, 0.2),
+        early_bank_deg=(45, 115, 10),
+        early_V=(4500, 6000, 500),
+        late_bank_deg=(40, 60, 5),
+        late_V=(2000, 3500, 250),
+        time_step=0.1, guidance_dt=0.5,
+        out_csv="efpa_bank_constraint_sweep.csv"
     )
+    print(df)
 
-    df = design_map_sweep(sim, settings)
-    df.to_csv("design_map_results.csv", index=False)
-    print("\nSaved: design_map_results.csv")
-    _ = plot_best_from_dataframe(sim, df, settings)
+    # pick the best schedule by minimal normalized constraint score
+    if 'score' in df.columns:
+        best_idx = df['score'].idxmin()
+        best = df.loc[best_idx]
+        print('\nBest schedule by normalized constraint score:')
+        print(best.to_string())
+
+        # run EFPA family for that bank schedule (use the LDv and velocities from best)
+        chosen_LDv_hi = float(best['LDv_hi'])
+        chosen_LDv_lo = float(best['LDv_lo'])
+        chosen_V_hi = float(best['V_hi'])
+        chosen_V_lo = float(best['V_lo'])
+
+        efpas = np.arange(-16.0, -12.0 + 1e-9, 0.2)
+        family_runs = run_efpa_family(sim, efpa_grid=(-16.0, -12.0, 0.2),
+                                      V_hi=chosen_V_hi, V_lo=chosen_V_lo,
+                                      LDv_hi=chosen_LDv_hi, LDv_lo=chosen_LDv_lo,
+                                      time_step=0.1, guidance_dt=0.5)
+
+        title = f"EFPA family for best schedule (score={best['score']:.3f}): Vhi={chosen_V_hi}, Vlo={chosen_V_lo}, LDv_hi={chosen_LDv_hi:.3f}, LDv_lo={chosen_LDv_lo:.3f}"
+        # plot all EFPA-family runs (both passing and failing) for inspection
+        _ = plot_sweep_states_and_constraints(family_runs, sim=sim, figsize=(12,10),
+                                              states_file="efpa_family_states.png",
+                                              constraints_file="efpa_family_constraints.png",
+                                              title=title)
+    else:
+        print('No score column available; cannot select best schedule.')
 
