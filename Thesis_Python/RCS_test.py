@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 import math
+from spherical_metrics import spherical_metrics
 import matplotlib.pyplot as plt
 
 # -----------------------
@@ -173,9 +174,13 @@ class ReentrySimulation:
 
         t = np.arange(start_time, stop_time, time_step)
         n = len(t)
-
         res = {k: np.zeros(n) for k in ["t","r","h","theta","phi","V","gamma","psi","sigma","q","A","Qdot","rho"]}
-        res.update({"Mach": np.zeros(n), "downrange_m": np.zeros(n)})
+        res.update({"Mach": np.zeros(n)})
+
+        # reference for downrange/crossrange calculations (ENU at initial location)
+        phi0 = self.ic.phi
+        theta0 = self.ic.theta
+        psi0 = self.ic.psi
 
         next_guid = start_time
         last_sigma = bank_angle if guidance is None else 0.0
@@ -198,15 +203,40 @@ class ReentrySimulation:
             am = self.dyn.aero_monitor(state)
             res["rho"][i], res["q"][i], res["A"][i], res["Qdot"][i] = am["rho"], am["q"], am["A_g"], am["Qdot"]
 
+
             # crude Mach estimate
             a = math.sqrt(self.mars.specific_heat_ratio * self.mars.R_s * self.atm.temperature(state.h))
-            res["Mach"][i] = state.V / max(a, 1e-6)
+            mach_now = state.V / max(a, 1e-6)
+            res["Mach"][i] = mach_now
 
-            # stop at deploy (NEW RULE): V <= 450 m/s OR h <= 6000 m
-            if state.h <= 0.0:
-                #print(f"Deploy condition met at t={ti:.1f} s: V={state.V:.1f} m/s, h={state.h:.1f} m")
-                for k in res:
-                    res[k] = res[k][:i+1]
+            # deploy/stop condition requested: (Mach in [1.4,2.2] AND q in [300,800]) OR h <= 0
+            q_now = res["q"][i]
+            mach_trigger = (1.4 <= mach_now <= 2.2)
+            q_trigger = (300.0 <= q_now <= 800.0)
+            if (mach_trigger and q_trigger) or (state.h <= 0.0):
+                # compute final spherical metrics once (no per-step approximation)
+                lat0 = self.ic.phi
+                lon0 = self.ic.theta
+                lat_final = state.phi
+                lon_final = state.theta
+                lat_t = self.target.phi
+                lon_t = self.target.theta
+                try:
+                    _, _, _, RC, RD, _, _ = spherical_metrics(lat0, lon0, lat_final, lon_final, lat_final, lon_final, self.mars.radius)
+                    final_cross = RC
+                    final_down = RD
+                except Exception:
+                    final_cross = float('nan')
+                    final_down = float('nan')
+
+                # store final scalar metrics
+                res["final_downrange_m"] = final_down
+                res["final_crossrange_m"] = final_cross
+
+                for k in list(res.keys()):
+                    # truncate only array entries
+                    if isinstance(res[k], np.ndarray):
+                        res[k] = res[k][:i+1]
                 break
 
             # integrate
@@ -401,6 +431,138 @@ def run_efpa_family(sim: ReentrySimulation, efpa_grid, V_hi, V_lo, LDv_hi, LDv_l
     return runs
 
 
+def run_bank_schedule_reachable_set(sim: ReentrySimulation,
+                                    efpa_deg=-12.0,
+                                    early_bank_deg=(45, 115, 10),
+                                    early_V=(4500, 6000, 500),
+                                    late_bank_deg=(40, 60, 5),
+                                    late_V=(2000, 3500, 250),
+                                    time_step=0.1, guidance_dt=0.5,
+                                    out_csv="reachable_set.csv"):
+    """Fix EFPA to efpa_deg and sweep bank-schedule endpoints to produce a reachable
+    set (downrange, crossrange) and final altitude for each trajectory. The score
+    is computed as the sum of normalized peak constraint costs (q/q_max + A/A_max + Qdot/Qdot_max).
+    """
+    # single efpa
+    efpa = float(efpa_deg)
+    # interpret bank-angle ranges
+    early_bank_list = _expand_range_or_list(early_bank_deg)
+    late_bank_list = _expand_range_or_list(late_bank_deg)
+    early_V_list = _expand_range_or_list(early_V)
+    late_V_list = _expand_range_or_list(late_V)
+
+    LD_nom = float(sim.veh.L_over_D)
+    LDv_hi_vals = [LD_nom * math.cos(math.radians(b)) for b in early_bank_list]
+    LDv_lo_vals = [LD_nom * math.cos(math.radians(b)) for b in late_bank_list]
+
+    rows = []
+    runs = []
+    for LDv_hi in LDv_hi_vals:
+        for V_hi in early_V_list:
+            for LDv_lo in LDv_lo_vals:
+                for V_lo in late_V_list:
+                    ic_mod = InitialConditions(h=sim.ic.h, theta=sim.ic.theta, phi=sim.ic.phi,
+                                               V=sim.ic.V, gamma=np.deg2rad(efpa), psi=sim.ic.psi)
+                    sim_local = ReentrySimulation(sim.mars, sim.veh, ic_mod, sim.target, sim.constraints)
+                    g = BankScheduleGuidance(sim.veh.L_over_D, V_hi, V_lo, LDv_hi, LDv_lo)
+
+                    res = sim_local.run(time_step=time_step, guidance=g, guidance_dt=guidance_dt)
+                    if len(res.get("t", [])) == 0:
+                        max_q = float('nan'); max_A = float('nan'); max_Qdot = float('nan')
+                        pass_q = pass_A = pass_Qdot = False
+                        final_down = float('nan'); final_cross = float('nan'); final_h = float('nan')
+                    else:
+                        max_q = float(np.max(res["q"]))
+                        max_A = float(np.max(res["A"]))
+                        max_Qdot = float(np.max(res["Qdot"]))
+                        pass_q = (max_q <= sim.constraints.q_max)
+                        pass_A = (max_A <= sim.constraints.A_max)
+                        pass_Qdot = (max_Qdot <= sim.constraints.Qdot_max)
+                        # compute final downrange/crossrange using spherical metrics (single call)
+                        try:
+                            lat0 = sim_local.ic.phi
+                            lon0 = sim_local.ic.theta
+                            lat_final = float(res["phi"][-1])
+                            lon_final = float(res["theta"][-1])
+                            lat_t = sim_local.target.phi
+                            lon_t = sim_local.target.theta
+                            _, _, _, RC, RD, _, _ = spherical_metrics(lat0, lon0, lat_final, lon_final, lat_t, lon_t, sim_local.mars.radius)
+                            final_cross = float(RC)
+                            final_down = float(RD)
+                        except Exception:
+                            final_cross = float('nan')
+                            final_down = float('nan')
+                        final_h = float(res["h"][-1])
+
+                    # score: sum of normalized constraint peaks (lower is better)
+                    try:
+                        score = (max_q / sim.constraints.q_max) + (max_A / sim.constraints.A_max) + (max_Qdot / sim.constraints.Qdot_max)
+                    except Exception:
+                        score = float('nan')
+
+                    rows.append({
+                        "efpa_deg": efpa,
+                        "LDv_hi": LDv_hi,
+                        "LDv_lo": LDv_lo,
+                        "V_hi": V_hi,
+                        "V_lo": V_lo,
+                        "max_q_Pa": max_q,
+                        "max_A_g": max_A,
+                        "max_Qdot_Wm2": max_Qdot,
+                        "score": score,
+                        "PASS_all": bool(pass_q and pass_A and pass_Qdot),
+                        "final_down_m": final_down,
+                        "final_cross_m": final_cross,
+                        "final_h_m": final_h
+                    })
+
+                    runs.append({
+                        "efpa_deg": efpa,
+                        "LDv_hi": LDv_hi,
+                        "LDv_lo": LDv_lo,
+                        "V_hi": V_hi,
+                        "V_lo": V_lo,
+                        "res": res,
+                        "PASS_all": bool(pass_q and pass_A and pass_Qdot),
+                        "score": score,
+                        "final_down_m": final_down,
+                        "final_cross_m": final_cross,
+                        "final_h_m": final_h
+                    })
+
+    df = pd.DataFrame(rows)
+    df.to_csv(out_csv, index=False)
+    print(f"Reachable-set sweep complete: {len(df)} runs. Saved: {out_csv}")
+    return df, runs
+
+
+def plot_reachable_set(df, title=None, figsize=(8,6), out_png="reachable_set.png"):
+    """Scatter plot CrossRange vs Downrange colored by final altitude.
+    Expects columns final_down_m, final_cross_m, final_h_m in dataframe.
+    """
+    df_valid = df.dropna(subset=["final_down_m", "final_cross_m", "final_h_m"]).copy()
+    if df_valid.empty:
+        print("No valid runs to plot.")
+        return None
+    x_km = df_valid["final_down_m"].values / 1000.0
+    y_km = df_valid["final_cross_m"].values / 1000.0
+    z_km = df_valid["final_h_m"].values / 1000.0
+
+    fig, ax = plt.subplots(figsize=figsize)
+    sc = ax.scatter(x_km, y_km, c=z_km, cmap='viridis', s=40, edgecolors='k')
+    cb = fig.colorbar(sc, ax=ax)
+    cb.set_label('Final altitude [km]')
+    ax.set_xlabel('Downrange [km]')
+    ax.set_ylabel('Crossrange [km]')
+    if title:
+        ax.set_title(title)
+    ax.grid(True)
+    fig.savefig(out_png, dpi=200)
+    print(f"Saved reachable set figure: {out_png}")
+    plt.show()
+    return fig, ax
+
+
 def plot_sweep_states_and_constraints(runs, sim=None, figsize=(12,10),
                                       states_file="efpa_states.png",
                                       constraints_file="efpa_constraints.png",
@@ -533,44 +695,20 @@ if __name__ == "__main__":
 
     sim = ReentrySimulation(mars, veh, ic, tgt, cons)
 
-    # Run the requested broader sweep (note: this can be computationally heavy)
-    df, runs = run_constraint_sweep(
+    # Run a bank-schedule sweep for fixed EFPA = -12 deg and compute reachable set
+    df, runs = run_bank_schedule_reachable_set(
         sim,
-        efpa_grid=(-15, -12.0, 1),
-        early_bank_deg=(45, 115, 10),
-        early_V=(4500, 6000, 500),
-        late_bank_deg=(40, 60, 5),
-        late_V=(2000, 3500, 250),
+        efpa_deg=-12.0,
+        early_bank_deg=(45, 115, 50),
+        early_V=(4500, 6000, 1000),
+        late_bank_deg=(40, 60, 20),
+        late_V=(2000, 3500, 1000),
         time_step=0.1, guidance_dt=0.5,
-        out_csv="efpa_bank_constraint_sweep.csv"
+        out_csv="reachable_set.csv"
     )
-    print(df)
+    print(df.head())
 
-    # pick the best schedule by minimal normalized constraint score
-    if 'score' in df.columns:
-        best_idx = df['score'].idxmin()
-        best = df.loc[best_idx]
-        print('\nBest schedule by normalized constraint score:')
-        print(best.to_string())
-
-        # run EFPA family for that bank schedule (use the LDv and velocities from best)
-        chosen_LDv_hi = float(best['LDv_hi'])
-        chosen_LDv_lo = float(best['LDv_lo'])
-        chosen_V_hi = float(best['V_hi'])
-        chosen_V_lo = float(best['V_lo'])
-
-        efpas = np.arange(-16.0, -12.0 + 1e-9, 0.2)
-        family_runs = run_efpa_family(sim, efpa_grid=(-16.0, -12.0, 0.2),
-                                      V_hi=chosen_V_hi, V_lo=chosen_V_lo,
-                                      LDv_hi=chosen_LDv_hi, LDv_lo=chosen_LDv_lo,
-                                      time_step=0.1, guidance_dt=0.5)
-
-        title = f"EFPA family for best schedule (score={best['score']:.3f}): Vhi={chosen_V_hi}, Vlo={chosen_V_lo}, LDv_hi={chosen_LDv_hi:.3f}, LDv_lo={chosen_LDv_lo:.3f}"
-        # plot all EFPA-family runs (both passing and failing) for inspection
-        _ = plot_sweep_states_and_constraints(family_runs, sim=sim, figsize=(12,10),
-                                              states_file="efpa_family_states.png",
-                                              constraints_file="efpa_family_constraints.png",
-                                              title=title)
-    else:
-        print('No score column available; cannot select best schedule.')
+    # Plot reachable set: CrossRange vs Downrange colored by final altitude
+    title = "Reachable set (EFPA=-12\u00b0)"
+    _ = plot_reachable_set(df, title=title, out_png="reachable_set.png")
 
