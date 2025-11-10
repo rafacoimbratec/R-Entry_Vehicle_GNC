@@ -128,7 +128,7 @@ def rk4_step(f, state, sigma, dt):
 # ============================================================
 # Simple bank profile: constant then linear ramp to 0
 # ============================================================
-def bank_profile(t, sigma_const=np.deg2rad(80.0), t1=200.0, t2=400.0):
+def bank_profile(t, sigma_const=np.deg2rad(180.0), t1=45.0, t2=100.0):
     if t < t1:
         return sigma_const
     elif t < t2:
@@ -157,6 +157,37 @@ def simulate_entry(initial_state, dt=0.25, tmax=2000.0):
         t += dt
     return state, t
 
+
+def simulate_entry_with_trace(initial_state, dt=0.25, tmax=2000.0):
+    """Simulate entry while recording state history and sigma(t).
+
+    Returns: times (1D), states (N x 6), sigmas (1D), trigger_index (int)
+    """
+    state = initial_state.copy()
+    a_sound = mars.a_sound
+    t = 0.0
+    times = [t]
+    states = [state.copy()]
+    sigmas = [bank_profile(t)]
+    trigger_index = None
+    while t < tmax:
+        sigma = bank_profile(t)
+        state = rk4_step(eom, state, sigma, dt)
+        t += dt
+        times.append(t)
+        states.append(state.copy())
+        sigmas.append(sigma)
+        r, th, ph, V, gam, psi = state
+        h = r - mars.radius
+        rho = mars.rho0 * np.exp(-h / mars.Hs)
+        q = 0.5 * rho * V**2
+        mach = V / a_sound
+        if ((1.4 <= mach <= 2.2) and (300 <= q <= 800)) or (h <= 0):
+            trigger_index = len(times) - 1
+            break
+
+    return np.array(times), np.array(states), np.array(sigmas), trigger_index
+
 # ============================================================
 # Build the contour set by sweeping target lat/lon grid
 # ============================================================
@@ -171,7 +202,7 @@ def build_reachable_set(lat0, lon0, lat_grid, lon_grid):
     for lat_t in lat_grid:
         for lon_t in lon_grid:
             state0 = np.array([r0, lon0, lat0, V0, gam0, psi0])
-            state_f, tf = simulate_entry(state0)
+            state_f, tf = simulate_entry(state0, tmax=4000.0)
             r, th, ph, V, gam, psi = state_f
             h = r - mars.radius
             # Compute metrics relative to the target
@@ -188,8 +219,113 @@ lat0 = -21.3 * deg2rad
 lon0 = -176.40167 * deg2rad
 
 # sweep ±3° around the nominal entry projection
-lat_grid = np.linspace(lat0 - 180*deg2rad, lat0 + 180*deg2rad, 10)
-lon_grid = np.linspace(lon0 - 180*deg2rad, lon0 + 180*deg2rad, 10)
+# sweep ±15° latitude, ±20° longitude
+lat_grid = np.linspace(lat0 - 15*deg2rad, lat0 + 15*deg2rad, 10)
+lon_grid = np.linspace(lon0 - 20*deg2rad, lon0 + 20*deg2rad, 10)
+
+
+# ------------------------------------------------------------
+# Run one example trajectory (trace sigma and states) and plot
+# ------------------------------------------------------------
+# choose a sample target a few degrees away from the entry projection
+lat_t_example = lat0 + 5.0 * deg2rad
+lon_t_example = lon0 + 10.0 * deg2rad
+
+# initial state ordering: r, th(lon), ph(lat), V, gam, psi
+state0_example = np.array([mars.radius + 120e3,
+                           lon0,
+                           lat0,
+                           4700.0,
+                           np.deg2rad(-15.0),
+                           np.deg2rad(-2.8758)])
+
+times, states, sigmas, trigger_idx = simulate_entry_with_trace(state0_example, dt=0.25, tmax=4000.0)
+if trigger_idx is None:
+    trigger_idx = len(times) - 1
+
+state_trigger = states[trigger_idx]
+t_trigger = times[trigger_idx]
+sigma_trigger = sigmas[trigger_idx]
+
+print("Example trajectory deploy trigger at t = {:.2f} s".format(t_trigger))
+print("State at trigger (r, lon, lat, V, gam, psi):")
+print(state_trigger)
+print("Sigma at trigger: {:.4f} rad = {:.2f} deg".format(sigma_trigger, np.degrees(sigma_trigger)))
+
+# Lat/Lon plot for the trajectory
+th_array = states[:,1]
+ph_array = states[:,2]
+plt.figure(figsize=(8,5))
+plt.plot(np.degrees(th_array), np.degrees(ph_array), '-o', markersize=3, label='trajectory')
+plt.scatter(np.degrees(lon0), np.degrees(lat0), color='green', s=60, label='initial (entry proj)')
+plt.scatter(np.degrees(lon_t_example), np.degrees(lat_t_example), color='red', s=60, label='target')
+plt.scatter(np.degrees(state_trigger[1]), np.degrees(state_trigger[2]), color='orange', s=80, marker='*', label='deploy trigger')
+plt.xlabel('Longitude [deg]')
+plt.ylabel('Latitude [deg]')
+plt.title('Example trajectory: lon/lat (initial, target, deploy)')
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+
+# Sigma vs time
+plt.figure(figsize=(8,3))
+plt.plot(times, np.degrees(sigmas), '-k')
+plt.axvline(t_trigger, color='orange', linestyle='--', label='deploy trigger')
+plt.xlabel('Time [s]')
+plt.ylabel('Bank angle sigma [deg]')
+plt.title('Bank profile sigma(t) for example trajectory')
+plt.legend()
+plt.tight_layout()
+
+# ------------------------------------------------------------
+# Combined figure: all states vs time (single figure with subplots)
+# ------------------------------------------------------------
+# Prepare arrays for plotting
+h_array = states[:,0] - mars.radius
+r_array = states[:,0]
+lon_array = np.degrees(states[:,1])
+lat_array = np.degrees(states[:,2])
+V_array = states[:,3]
+gam_array = np.degrees(states[:,4])
+psi_array = np.degrees(states[:,5])
+sigma_deg = np.degrees(sigmas)
+
+fig, axes = plt.subplots(4, 2, figsize=(12, 10))
+axes = axes.flatten()
+
+axes[0].plot(times, h_array/1000.0, '-b')
+axes[0].set_ylabel('Altitude [km]')
+axes[0].set_title('Altitude (h)')
+
+axes[1].plot(times, r_array/1000.0, '-c')
+axes[1].set_ylabel('Radius [km]')
+
+axes[2].plot(times, lon_array, '-g')
+axes[2].set_ylabel('Longitude [deg]')
+
+axes[3].plot(times, lat_array, '-m')
+axes[3].set_ylabel('Latitude [deg]')
+
+axes[4].plot(times, V_array, '-k')
+axes[4].set_ylabel('Velocity [m/s]')
+
+axes[5].plot(times, gam_array, '-r')
+axes[5].set_ylabel('Flight path angle γ [deg]')
+
+axes[6].plot(times, psi_array, '-y')
+axes[6].set_ylabel('Heading ψ [deg]')
+
+axes[7].plot(times, sigma_deg, color='0.5')
+axes[7].axvline(t_trigger, color='orange', linestyle='--')
+axes[7].set_ylabel('Bank σ [deg]')
+
+for ax in axes:
+    ax.set_xlabel('Time [s]')
+    ax.grid(True)
+
+plt.suptitle('All example trajectory states vs time', y=1.02)
+plt.tight_layout()
+
 
 res = build_reachable_set(lat0, lon0, lat_grid, lon_grid)
 RD, RC, ALT = res[:,0], res[:,1], res[:,2]
@@ -197,8 +333,8 @@ RD, RC, ALT = res[:,0], res[:,1], res[:,2]
 # ============================================================
 # Interpolate and contour plot (safe version)
 # ============================================================
-xi = np.linspace(RD.min(), RD.max(), 200)
-yi = np.linspace(RC.min(), RC.max(), 200)
+xi = np.linspace(RD.min(), RD.max(), 10)
+yi = np.linspace(RC.min(), RC.max(), 10)
 XI, YI = np.meshgrid(xi, yi)
 ZI = griddata((RD, RC), ALT, (XI, YI), method='linear')
 
@@ -223,6 +359,7 @@ plt.title('Reachable-set contours (constant-then-ramp σ(t))')
 plt.grid(True)
 plt.tight_layout()
 plt.show()
+
 
 
 
