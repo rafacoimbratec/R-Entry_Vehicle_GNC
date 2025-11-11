@@ -1,6 +1,8 @@
+import random
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.interpolate import griddata
+import random
 
 # ============================================================
 # Mars environment and vehicle constants
@@ -14,12 +16,30 @@ class MarsEnv:
     gamma_gas = 1.29
     R_star = 8314.32           # [J/(kmol*K)]
     M_CO2 = 44.01              # [kg/kmol]
-    T_const = 210.0            # [K]
+    T_const = 210.0            # [K] (legacy default; not used in Mach now)
 
-    @property
-    def a_sound(self):
+    def temperature(self, h: float) -> float:
+        """
+        Atmospheric temperature model (simplified; altitude-dependent).
+
+        Args:
+            h: Altitude above mean radius [m]
+
+        Returns:
+            Temperature [K]
+        """
+        # Old Lee et al. (2024) model provided by user
+        h_km = h / 1e3
+        T = 1.4e-13 * h_km**3 - 8.85e-9 * h_km**2 - 1.245e-3 * h_km + 205.36
+        return T
+
+    def sound_speed(self, h: float) -> float:
+        """Speed of sound [m/s] at altitude h using temperature(h)."""
         Rspec = MarsEnv.R_star / MarsEnv.M_CO2
-        return np.sqrt(MarsEnv.gamma_gas * Rspec * MarsEnv.T_const)
+        T = self.temperature(h)
+        # Guard against non-physical/negative temperatures from the fit
+        T = max(1.0, float(T))
+        return np.sqrt(MarsEnv.gamma_gas * Rspec * T)
 
 
 class Vehicle:
@@ -128,7 +148,7 @@ def rk4_step(f, state, sigma, dt):
 # ============================================================
 # Simple bank profile: constant then linear ramp to 0
 # ============================================================
-def bank_profile(t, sigma_const=np.deg2rad(180.0), t1=45.0, t2=100.0):
+def bank_profile(t, sigma_const=np.deg2rad(75.0), t1=45.0, t2=100.0):
     if t < t1:
         return sigma_const
     elif t < t2:
@@ -140,38 +160,37 @@ def bank_profile(t, sigma_const=np.deg2rad(180.0), t1=45.0, t2=100.0):
 # ============================================================
 # Integrate one trajectory until deployment trigger
 # ============================================================
-def simulate_entry(initial_state, dt=0.25, tmax=2000.0):
+def simulate_entry(initial_state, dt=0.25, tmax=2000.0, sigma_const=np.deg2rad(75.0), t1=45.0, t2=100.0):
     state = initial_state.copy()
-    a_sound = mars.a_sound
     t = 0.0
     while t < tmax:
-        sigma = bank_profile(t)
+        sigma = bank_profile(t, sigma_const=sigma_const, t1=t1, t2=t2)
         state = rk4_step(eom, state, sigma, dt)
         r, th, ph, V, gam, psi = state
         h = r - mars.radius
         rho = mars.rho0 * np.exp(-h / mars.Hs)
         q = 0.5 * rho * V**2
-        mach = V / a_sound
+        a = mars.sound_speed(h)
+        mach = V / a
         if ((1.4 <= mach <= 2.2) and (300 <= q <= 800)) or (h <= 0):
             break
         t += dt
     return state, t
 
 
-def simulate_entry_with_trace(initial_state, dt=0.25, tmax=2000.0):
+def simulate_entry_with_trace(initial_state, dt=0.25, tmax=2000.0, t1=0.0, t2=100.0):
     """Simulate entry while recording state history and sigma(t).
 
     Returns: times (1D), states (N x 6), sigmas (1D), trigger_index (int)
     """
     state = initial_state.copy()
-    a_sound = mars.a_sound
     t = 0.0
     times = [t]
     states = [state.copy()]
-    sigmas = [bank_profile(t)]
+    sigmas = [bank_profile(t, t1=t1, t2=t2)]
     trigger_index = None
     while t < tmax:
-        sigma = bank_profile(t)
+        sigma = bank_profile(t, t1=t1, t2=t2)
         state = rk4_step(eom, state, sigma, dt)
         t += dt
         times.append(t)
@@ -181,7 +200,8 @@ def simulate_entry_with_trace(initial_state, dt=0.25, tmax=2000.0):
         h = r - mars.radius
         rho = mars.rho0 * np.exp(-h / mars.Hs)
         q = 0.5 * rho * V**2
-        mach = V / a_sound
+        a = mars.sound_speed(h)
+        mach = V / a
         if ((1.4 <= mach <= 2.2) and (300 <= q <= 800)) or (h <= 0):
             trigger_index = len(times) - 1
             break
@@ -197,14 +217,17 @@ def build_reachable_set(lat0, lon0, lat_grid, lon_grid):
     h0 = 120e3
     r0 = mars.radius + h0
     V0 = 4700.0
-    gam0 = np.deg2rad(-15.0)
+    gam0 = np.deg2rad(-12.0)
     psi0 = np.deg2rad(-2.8758)
     for lat_t in lat_grid:
         for lon_t in lon_grid:
             state0 = np.array([r0, lon0, lat0, V0, gam0, psi0])
-            state_f, tf = simulate_entry(state0, tmax=4000.0)
+            t1=random.uniform(0, 45)
+            t2=random.uniform(60, 150)
+            state_f, tf = simulate_entry(state0,dt=0.25, tmax=4000.0, t1=t1, t2=t2)
             r, th, ph, V, gam, psi = state_f
             h = r - mars.radius
+            print("h_final = {:.2f} km for target lat = {:.2f} deg, lon = {:.2f} deg".format(h/1000.0, np.degrees(lat_t), np.degrees(lon_t)))
             # Compute metrics relative to the target
             d_m, sin_d, cos_d, RC, RD, RD_go, Rgo = spherical_metrics(
                 lat0, lon0, ph, th, lat_t, lon_t, mars.radius)
@@ -220,23 +243,23 @@ lon0 = -176.40167 * deg2rad
 
 # sweep ±3° around the nominal entry projection
 # sweep ±15° latitude, ±20° longitude
-lat_grid = np.linspace(lat0 - 15*deg2rad, lat0 + 15*deg2rad, 10)
-lon_grid = np.linspace(lon0 - 20*deg2rad, lon0 + 20*deg2rad, 10)
+lat_grid = np.linspace(lat0 - 30*deg2rad, lat0 + 30*deg2rad, 10)
+lon_grid = np.linspace(lon0 - 2*deg2rad, lon0 + 2*deg2rad, 10)
 
 
 # ------------------------------------------------------------
 # Run one example trajectory (trace sigma and states) and plot
 # ------------------------------------------------------------
 # choose a sample target a few degrees away from the entry projection
-lat_t_example = lat0 + 5.0 * deg2rad
-lon_t_example = lon0 + 10.0 * deg2rad
+lat_t_example = lat0 + 10 * deg2rad
+lon_t_example = lon0 - 0.5 * deg2rad
 
 # initial state ordering: r, th(lon), ph(lat), V, gam, psi
 state0_example = np.array([mars.radius + 120e3,
                            lon0,
                            lat0,
                            4700.0,
-                           np.deg2rad(-15.0),
+                           np.deg2rad(-12.0),
                            np.deg2rad(-2.8758)])
 
 times, states, sigmas, trigger_idx = simulate_entry_with_trace(state0_example, dt=0.25, tmax=4000.0)
@@ -331,26 +354,14 @@ res = build_reachable_set(lat0, lon0, lat_grid, lon_grid)
 RD, RC, ALT = res[:,0], res[:,1], res[:,2]
 
 # ============================================================
-# Interpolate and contour plot (safe version)
+# Contours from scattered points (no gridding) – avoids NaN fill
 # ============================================================
-xi = np.linspace(RD.min(), RD.max(), 10)
-yi = np.linspace(RC.min(), RC.max(), 10)
-XI, YI = np.meshgrid(xi, yi)
-ZI = griddata((RD, RC), ALT, (XI, YI), method='linear')
-
-# Fill any NaNs (so we have a continuous surface)
-if np.any(np.isnan(ZI)):
-    ZI[np.isnan(ZI)] = np.nanmean(ALT)
-
-# Ensure levels are strictly increasing
-zmin, zmax = np.nanmin(ZI), np.nanmax(ZI)
-if np.isclose(zmin, zmax):
-    zmax = zmin + 1e-6  # avoid zero range
-levels = np.linspace(zmin, zmax, 10)
-
+# Using tricontourf draws only over the convex hull of the samples instead of
+# filling the entire rectangular domain with a constant color.
+levels = 12
 plt.figure(figsize=(8,6))
-cf = plt.contourf(XI, YI, ZI, levels=levels, cmap='viridis', extend='both')
-cs = plt.contour(XI, YI, ZI, levels=levels, colors='k', linewidths=0.5)
+cf = plt.tricontourf(RD, RC, ALT, levels=levels, cmap='viridis')
+cs = plt.tricontour(RD, RC, ALT, levels=levels, colors='k', linewidths=0.6)
 plt.clabel(cs, fmt="%.1f", fontsize=8)
 plt.colorbar(cf, label='Deployment altitude [km]')
 plt.xlabel('Downrange [km]')
