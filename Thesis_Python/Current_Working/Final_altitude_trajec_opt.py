@@ -22,12 +22,8 @@ class Mars:
     def temperature(self, h: float) -> float:
         """
         Atmospheric temperature model (simplified; altitude-dependent).
-
-        Args:
-            h: Altitude above mean radius [m]
-
-        Returns:
-            Temperature [K]
+        Args: h [m] altitude above mean radius
+        Returns: Temperature [K]
         """
         # Old Lee et al. (2024) model provided by user
         h_km = h / 1e3
@@ -96,6 +92,8 @@ gam0 = deg(-12.0)
 psi0 = deg(-2.8758)
 lat0 = deg(-21.3)
 lon0 = deg(-176.40167)
+lat_target = deg(0.276)
+lon_target = deg(-175.8)
 state0 = np.array([r0, lon0, lat0, V0, gam0, psi0])
 
 # Bank limits (magnitudes)
@@ -110,20 +108,34 @@ SIGMA_MAX = np.deg2rad(SIGMA_MAX_DEG)
 SIGMA_DOT_MAX = np.deg2rad(SIGMA_DOT_MAX_DEG_S)
 SIGMA_DDOT_MAX = np.deg2rad(SIGMA_DDOT_MAX_DEG_S2)
 
+# Reversal timing settings
+MIN_GAP = 15.0  # [s] minimum time between reversals
+
 # Reversal windows (softly encouraged by penalties)
-T1_MIN, T1_MAX = 5.0, 400.0
-T2_MIN, T2_MAX = 30.0, 800.0
-T3_MIN, T3_MAX = 60.0, 1100.0
+T1_MIN, T1_MAX = 50, 110.0
+T2_MIN, T2_MAX = 110, 130
+T3_MIN, T3_MAX = 130, 200
 
 # Initial guess [t1, t2, t3, s1, s2, s3, s4] (deg)
 x0 = np.array([90, 120, 140, 0, -80.0, 85, 0])
 
 # ============================================================
-# BANK COMMAND PROFILE + SLEW-LIMITED TRACKER
+# BANK COMMAND PROFILE + PD SLEW-LIMITED TRACKER
 # ============================================================
 def build_times_sorted(t1, t2, t3):
-    ts = np.clip(np.sort(np.array([t1, t2, t3], dtype=float)), 0.0, T_END)
-    return ts[0], ts[1], ts[2]
+    """
+    Sort times and ENFORCE a minimum gap (projection). Also clip into [0, T_END].
+    """
+    ts = np.sort(np.array([t1, t2, t3], dtype=float))
+    t1s, t2s, t3s = ts.tolist()
+    # enforce min gaps by pushing forward if needed
+    if t2s < t1s + MIN_GAP: t2s = t1s + MIN_GAP
+    if t3s < t2s + MIN_GAP: t3s = t2s + MIN_GAP
+    # clip into horizon
+    t1s = np.clip(t1s, 0.0, T_END)
+    t2s = np.clip(t2s, 0.0, T_END)
+    t3s = np.clip(t3s, 0.0, T_END)
+    return t1s, t2s, t3s
 
 def sigma_cmd_of_time(t, t1, t2, t3, s1, s2, s3, s4):
     """Piecewise-constant command in radians (clamped to ±90°)."""
@@ -134,34 +146,27 @@ def sigma_cmd_of_time(t, t1, t2, t3, s1, s2, s3, s4):
     return np.deg2rad(np.clip(s, SIGMA_MIN_DEG, SIGMA_MAX_DEG))
 
 class SigmaLimiterState:
-    def __init__(self, sigma0=0.0, sigmadot0=0.0):
+    """
+    PD tracker with hard limits on |sigma|, |sigma_dot|, |sigma_ddot|.
+    """
+    def __init__(self, sigma0=0.0, sigmadot0=0.0, k_pos=8.0, k_vel=4.0):
         self.sigma = float(np.clip(sigma0, SIGMA_MIN, SIGMA_MAX))
         self.sigmadot = float(np.clip(sigmadot0, -SIGMA_DOT_MAX, SIGMA_DOT_MAX))
+        self.k_pos = float(k_pos)
+        self.k_vel = float(k_vel)
 
 def advance_sigma_limiter(state: SigmaLimiterState, sigma_cmd: float, dt: float) -> Tuple[float,float,float]:
     """
-    Second-order rate/accel limiter that tracks sigma_cmd.
-    Enforces: |sigma| ≤ 90°, |sigma_dot| ≤ 20°/s, |sigma_ddot| ≤ 5°/s² (all in radians).
-    Returns (sigma, sigma_dot, sigma_ddot).
+    Pure PD mode (bounded by accel/rate and position). Returns (sigma, sigma_dot, sigma_ddot).
     """
-    # Desired accel towards command (critically damped like)
-    k_vel = 4.0    # tracking gain on velocity error
-    k_pos = 8.0    # tracking gain on position error
     sig_err = sigma_cmd - state.sigma
-    # Proportional-derivative desired accel
-    sigma_ddot_des = k_pos*sig_err - k_vel*state.sigmadot
-
-    # Saturate accel
+    sigma_ddot_des = state.k_pos*sig_err - state.k_vel*state.sigmadot
     sigma_ddot = float(np.clip(sigma_ddot_des, -SIGMA_DDOT_MAX, SIGMA_DDOT_MAX))
 
-    # Integrate velocity with accel limit
     sigmadot_new = state.sigmadot + sigma_ddot*dt
     sigmadot_new = float(np.clip(sigmadot_new, -SIGMA_DOT_MAX, SIGMA_DOT_MAX))
 
-    # Integrate position and clip to bounds
     sigma_new = state.sigma + sigmadot_new*dt
-
-    # If we hit position bounds, prevent integrating further out
     if sigma_new > SIGMA_MAX:
         sigma_new = SIGMA_MAX
         if sigmadot_new > 0.0: sigmadot_new = 0.0
@@ -169,7 +174,6 @@ def advance_sigma_limiter(state: SigmaLimiterState, sigma_cmd: float, dt: float)
         sigma_new = SIGMA_MIN
         if sigmadot_new < 0.0: sigmadot_new = 0.0
 
-    # Update internal state
     state.sigma = sigma_new
     state.sigmadot = sigmadot_new
     return sigma_new, sigmadot_new, sigma_ddot
@@ -193,6 +197,8 @@ def simulate_profile(params, return_history=False):
 
     deployed = False
     deploy_time = None
+    impact = False
+    impact_time = None
 
     if return_history:
         hist = {"t":[], "h":[], "V":[], "gam":[], "psi":[], "th":[], "ph":[],
@@ -208,19 +214,22 @@ def simulate_profile(params, return_history=False):
         a_sound = mars.sound_speed(h)
         mach = V / max(a_sound, 1e-6)
 
-        # Deployment trigger
+        # Events
+        if h <= 0.0:
+            impact = True
+            impact_time = t
+            break
         deploy_cond = (1.4 <= mach <= 2.2) and (300.0 <= q <= 800.0)
-
-        if h <= 0.0 or deploy_cond:
+        if deploy_cond:
             deployed = True
             deploy_time = t
             break
 
-        # bank command & slew-limited application
+        # bank command & limiter
         sigma_c = sigma_cmd_of_time(t, t1, t2, t3, s1, s2, s3, s4)
         sigma, sigma_dot, sigma_ddot = advance_sigma_limiter(sig_state, sigma_c, DT)
 
-        # record history
+        # record
         if return_history:
             hist["t"].append(t)
             hist["h"].append(h)
@@ -242,12 +251,16 @@ def simulate_profile(params, return_history=False):
         state = rk4_step(eom, state, sigma, DT)
         t += DT
 
-        # impact safeguard
+        # impact guard
         if state[0] <= mars.radius:
+            impact = True
+            impact_time = t
             break
 
-    final_alt = state[0] - mars.radius
-    out = (final_alt, hist, deployed, deploy_time) if return_history else final_alt
+    raw_final_alt = state[0] - mars.radius
+    final_alt = 0.0 if impact else raw_final_alt
+
+    out = (final_alt, hist, deployed, (deploy_time if deployed else impact_time)) if return_history else final_alt
     return out
 
 # ============================================================
@@ -280,11 +293,21 @@ def make_objective(counter: EvalCounter):
         if not (t1 <= t2 <= t3):
             ts = np.array([t1, t2, t3]); pen += 10.0*np.sum((ts - np.sort(ts))**2)
 
+        # (optional) add min-gap penalty too, despite projection, to steer away from tight gaps
+        t1s, t2s, t3s = np.sort([t1, t2, t3])
+        gap12 = t2s - t1s
+        gap23 = t3s - t2s
+        GAP_W = 1e2
+        pen += GAP_W * max(0.0, MIN_GAP - gap12)**2
+        pen += GAP_W * max(0.0, MIN_GAP - gap23)**2
+
         # simulate with limiter + deploy rule
         final_alt = simulate_profile(x)
         J = -final_alt + 1e-6*pen
-        # >>> quick progress print <<<
+
+        # progress print
         if counter.count % EVAL_PRINT_EVERY == 0:
+            print("Final altitude in km:", final_alt/1e3)
             elapsed = time.perf_counter() - t0
             t1, t2, t3, s1, s2, s3, s4 = x
             print(f"[OBJ] eval={counter.count:5d}  J={J: .3f}  "
@@ -309,7 +332,7 @@ def hooke_jeeves(objective, x0, step0=50.0, step_min=1e-2, alpha=2.0, gamma=0.5,
                 if f < f_best:
                     x_new, f_best, improved = cand, f, True
         if improved:
-            print(f"[HJ] improve  f={f_best: .3f}  step_max={np.max(step):.2f}")
+            #print(f"[HJ] improve  f={f_best: .3f}  step_max={np.max(step):.2f}")
             d = x_new - x
             x_pat = x_new + alpha*d
             f_pat = objective(x_pat); evals += 1
@@ -319,8 +342,7 @@ def hooke_jeeves(objective, x0, step0=50.0, step_min=1e-2, alpha=2.0, gamma=0.5,
                 x, fx = x_new, f_best
         else:
             step *= gamma
-            print(f"[HJ] shrink   step_max={np.max(step):.2f}  f={fx: .3f}")
-
+            #print(f"[HJ] shrink   step_max={np.max(step):.2f}  f={fx: .3f}")
     return x, fx, evals
 
 # ============================================================
@@ -333,8 +355,7 @@ def print_params(x):
     print(f"  sigmas    = {s1:7.2f}, {s2:7.2f}, {s3:7.2f}, {s4:7.2f}  [deg]")
 
 def _collect_hist(x):
-    final_alt, hist, deployed, t_dep = simulate_profile(x, return_history=True)
-    import numpy as np
+    final_alt, hist, deployed, t_event = simulate_profile(x, return_history=True)
     out = {
         "t": np.array(hist["t"]),
         "h": np.array(hist["h"])/1e3,  # km
@@ -348,7 +369,7 @@ def _collect_hist(x):
         "sigdot": np.rad2deg(np.array(hist["sigma_dot"])),
         "sigddot": np.rad2deg(np.array(hist["sigma_ddot"])),
         "final_alt": final_alt/1e3,  # km
-        "t_dep": t_dep,
+        "t_event": t_event,
     }
     t1, t2, t3, *_ = x
     out["t1"], out["t2"], out["t3"] = build_times_sorted(t1, t2, t3)
@@ -356,7 +377,6 @@ def _collect_hist(x):
 
 def plot_states(x, title_prefix="Profile"):
     d = _collect_hist(x)
-    import matplotlib.pyplot as plt
 
     def vline(ax, ti, lab):
         if ti is None: return
@@ -364,11 +384,11 @@ def plot_states(x, title_prefix="Profile"):
         ytop = ax.get_ylim()[1]
         ax.text(ti, ytop*0.92, lab, rotation=90, va='top', ha='left', alpha=0.7, fontsize=8)
 
-    def dep_marker(ax):
-        if d["t_dep"] is not None:
-            ax.axvline(d["t_dep"], ls=":", alpha=0.9)
+    def event_marker(ax):
+        if d["t_event"] is not None:
+            ax.axvline(d["t_event"], ls=":", alpha=0.9)
             ytop = ax.get_ylim()[1]
-            ax.text(d["t_dep"], ytop*0.85, "DEPLOY", rotation=90, va='top', ha='left', fontweight='bold', fontsize=8)
+            ax.text(d["t_event"], ytop*0.85, "EVENT", rotation=90, va='top', ha='left', fontweight='bold', fontsize=8)
 
     fig = plt.figure(figsize=(12, 14))
     fig.suptitle(f"{title_prefix} — States (final h = {d['final_alt']:.1f} km)", y=0.98, fontsize=14)
@@ -377,29 +397,29 @@ def plot_states(x, title_prefix="Profile"):
 
     ax = axes[0]
     ax.plot(d["t"], d["h"]); ax.set_xlabel("t [s]"); ax.set_ylabel("Altitude [km]")
-    vline(ax,d["t1"],"t1"); vline(ax,d["t2"],"t2"); vline(ax,d["t3"],"t3"); dep_marker(ax); ax.grid(True)
+    vline(ax,d["t1"],"t1"); vline(ax,d["t2"],"t2"); vline(ax,d["t3"],"t3"); event_marker(ax); ax.grid(True)
 
     ax = axes[1]
     ax.plot(d["t"], d["V"]); ax.set_xlabel("t [s]"); ax.set_ylabel("Velocity [m/s]")
-    vline(ax,d["t1"],"t1"); vline(ax,d["t2"],"t2"); vline(ax,d["t3"],"t3"); dep_marker(ax); ax.grid(True)
+    vline(ax,d["t1"],"t1"); vline(ax,d["t2"],"t2"); vline(ax,d["t3"],"t3"); event_marker(ax); ax.grid(True)
 
     ax = axes[2]
     ax.plot(d["t"], d["q"]); ax.set_xlabel("t [s]"); ax.set_ylabel("q [Pa]")
     ax.fill_between(d["t"], 300.0, 800.0, alpha=0.1, step="pre", label="deploy q-band")
-    vline(ax,d["t1"],"t1"); vline(ax,d["t2"],"t2"); vline(ax,d["t3"],"t3"); dep_marker(ax); ax.grid(True)
+    vline(ax,d["t1"],"t1"); vline(ax,d["t2"],"t2"); vline(ax,d["t3"],"t3"); event_marker(ax); ax.grid(True)
 
     ax = axes[3]
     ax.plot(d["t"], d["mach"]); ax.set_xlabel("t [s]"); ax.set_ylabel("Mach [-]")
     ax.fill_between(d["t"], 1.4, 2.2, alpha=0.1, step="pre", label="deploy M-band")
-    vline(ax,d["t1"],"t1"); vline(ax,d["t2"],"t2"); vline(ax,d["t3"],"t3"); dep_marker(ax); ax.grid(True)
+    vline(ax,d["t1"],"t1"); vline(ax,d["t2"],"t2"); vline(ax,d["t3"],"t3"); event_marker(ax); ax.grid(True)
 
     ax = axes[4]
     ax.plot(d["t"], d["gam"]); ax.set_xlabel("t [s]"); ax.set_ylabel("γ [deg]")
-    vline(ax,d["t1"],"t1"); vline(ax,d["t2"],"t2"); vline(ax,d["t3"],"t3"); dep_marker(ax); ax.grid(True)
+    vline(ax,d["t1"],"t1"); vline(ax,d["t2"],"t2"); vline(ax,d["t3"],"t3"); event_marker(ax); ax.grid(True)
 
     ax = axes[5]
     ax.plot(d["t"], d["psi"]); ax.set_xlabel("t [s]"); ax.set_ylabel("ψ [deg]")
-    vline(ax,d["t1"],"t1"); vline(ax,d["t2"],"t2"); vline(ax,d["t3"],"t3"); dep_marker(ax); ax.grid(True)
+    vline(ax,d["t1"],"t1"); vline(ax,d["t2"],"t2"); vline(ax,d["t3"],"t3"); event_marker(ax); ax.grid(True)
 
     plt.show()
 
@@ -432,13 +452,12 @@ def plot_sigma(x, title_prefix="Profile"):
             ytop = ax.get_ylim()[1]
             ax.text(ti, ytop*0.92, lab, rotation=90, va='top', ha='left', alpha=0.7, fontsize=8)
 
-    if d["t_dep"] is not None:
-        ax.axvline(d["t_dep"], ls=":", alpha=0.9)
+    if d["t_event"] is not None:
+        ax.axvline(d["t_event"], ls=":", alpha=0.9)
         ytop = ax.get_ylim()[1]
-        ax.text(d["t_dep"], ytop*0.85, "DEPLOY", rotation=90, va='top', ha='left', fontweight='bold', fontsize=8)
+        ax.text(d["t_event"], ytop*0.85, "EVENT", rotation=90, va='top', ha='left', fontweight='bold', fontsize=8)
 
     plt.show()
-
 
 # ============================================================
 # RUN OPTIMIZERS & COMPARE
@@ -450,8 +469,10 @@ def run_comparison():
     nm_counter = EvalCounter()
     nm_obj = make_objective(nm_counter)
     t0 = time.perf_counter()
-    res_nm = minimize(nm_obj, x_init, method="Nelder-Mead",
-                      options=dict(maxiter=2000, xatol=1e-3, fatol=1e-3, disp=False))
+    res_nm = minimize(
+        nm_obj, x_init, method="Nelder-Mead",
+        options=dict(maxiter=2000, xatol=1e-3, fatol=1e-3, disp=False)  # you can add adaptive=True
+    )
     nm_time = time.perf_counter() - t0
     nm_x, nm_J, nm_evals = res_nm.x, res_nm.fun, nm_counter.count
 
@@ -472,6 +493,8 @@ def run_comparison():
     print(f"Hooke–Jeeves: J = {hj_J: .3f},   evals = {hj_evals},   time = {hj_time: .3f}s")
     print(f"\nBest: {best_name}")
     print_params(best_x)
+    print(f"\nWorst: {'Hooke–Jeeves' if best_name=='Nelder–Mead' else 'Nelder–Mead'}")
+    print_params(hj_x if best_name=='Nelder–Mead' else nm_x)
 
     return {"nm": dict(x=nm_x, J=nm_J, evals=nm_evals, time=nm_time, success=res_nm.success),
             "hj": dict(x=hj_x, J=hj_J, evals=hj_evals, time=hj_time),
