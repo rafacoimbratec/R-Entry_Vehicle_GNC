@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.interpolate import griddata
 import random
+from spherical_metrics import spherical_metrics
 
 # ============================================================
 # Mars environment and vehicle constants
@@ -52,62 +53,6 @@ class Vehicle:
 
 mars = MarsEnv()
 veh = Vehicle()
-
-# ============================================================
-# spherical_metrics (from user)
-# ============================================================
-def spherical_metrics(lat0, lon0, lat, lon, lat_t, lon_t, Rplanet):
-    def clamp(x, lo=-1.0, hi=1.0): return np.clip(x, lo, hi)
-    def norm(v): return np.linalg.norm(v, axis=-1, keepdims=False)
-    def safe_unit(v, eps=1e-12):
-        n = norm(v)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            out = np.where(n[..., None] > eps, v / n[..., None], 0.0)
-        return out, n
-    def sph2cartvec(lat_, lon_):
-        x = np.cos(lat_) * np.cos(lon_)
-        y = np.cos(lat_) * np.sin(lon_)
-        z = np.sin(lat_)
-        return np.stack((x, y, z), axis=-1)
-
-    cos_d = np.sin(lat0)*np.sin(lat) + np.cos(lat0)*np.cos(lat)*np.cos(lon - lon0)
-    cos_d = clamp(cos_d, -1.0, 1.0)
-    d = np.arccos(cos_d)
-    sin_d = np.sqrt(np.maximum(0.0, 1.0 - cos_d**2))
-
-    rE = sph2cartvec(lat0, lon0)
-    rP = sph2cartvec(lat, lon)
-    rT = sph2cartvec(lat_t, lon_t)
-    nOET = np.cross(rE, rT); nOET, _ = safe_unit(nOET)
-    nOEP = np.cross(rE, rP); nOEP_unit, nOEP_norm = safe_unit(nOEP)
-    if np.isscalar(nOEP_norm):
-        if nOEP_norm < 1e-12: nOEP_unit = nOET
-    else:
-        nOEP_unit = np.where((nOEP_norm[..., None] < 1e-12), nOET, nOEP_unit)
-    dot_planes = np.sum(nOEP_unit * nOET, axis=-1)
-    dot_planes = clamp(dot_planes, -1.0, 1.0)
-    i = np.arccos(dot_planes)
-    RC_ang = np.arcsin(clamp(np.sin(i) * sin_d, -1.0, 1.0))
-    cross_planes = np.cross(nOEP_unit, nOET); cross_norm = norm(cross_planes)
-    with np.errstate(divide='ignore', invalid='ignore'):
-        cross_hat = np.where(cross_norm[..., None] > 1e-12,
-                             cross_planes / cross_norm[..., None], 0.0)
-    sign_val = np.sum(cross_hat * rE, axis=-1)
-    RC_ang = np.where(sign_val < 0, -RC_ang, RC_ang)
-    cos_RC = np.cos(RC_ang)
-    denom = np.where(np.abs(cos_RC) < 1e-12, np.sign(cos_RC)*1e-12, cos_RC)
-    val = clamp(cos_d / denom, -1.0, 1.0)
-    RD_ang = np.arccos(val)
-    cos_dt = np.sin(lat0)*np.sin(lat_t) + np.cos(lat0)*np.cos(lat_t)*np.cos(lon_t - lon0)
-    cos_dt = clamp(cos_dt, -1.0, 1.0)
-    val_tot = clamp(cos_dt / denom, -1.0, 1.0)
-    RD_tot_ang = np.arccos(val_tot)
-    RD_go = (RD_tot_ang - RD_ang) * Rplanet
-    Rgo = np.sqrt(RD_go**2 + (RC_ang * Rplanet)**2)
-    RC = RC_ang * Rplanet
-    RD = RD_ang * Rplanet
-    d_m = d * Rplanet
-    return d_m, sin_d, cos_d, RC, RD, RD_go, Rgo
 
 # ============================================================
 # Equations of motion
@@ -241,8 +186,7 @@ deg2rad = np.pi/180
 lat0 = -21.3 * deg2rad
 lon0 = -176.40167 * deg2rad
 
-# sweep ±3° around the nominal entry projection
-# sweep ±15° latitude, ±20° longitude
+# sweep ±30° latitude, ±2° longitude
 lat_grid = np.linspace(lat0 - 30*deg2rad, lat0 + 30*deg2rad, 10)
 lon_grid = np.linspace(lon0 - 2*deg2rad, lon0 + 2*deg2rad, 10)
 
