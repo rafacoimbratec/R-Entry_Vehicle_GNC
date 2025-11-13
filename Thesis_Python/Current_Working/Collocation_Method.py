@@ -158,11 +158,11 @@ V0   = 4700.0      # [m/s] Entry velocity
 gam0 = deg(-12.0)  # [rad] Entry flight path angle (negative = descending)
 psi0 = deg(-2.8758) # [rad] Entry heading angle
 lat0 = deg(-21.5)  # [rad] Entry latitude
-lon0 = deg(-90)   # [rad] Entry longitude
+lon0 = deg(-176.40167)   # [rad] Entry longitude
 
 # Target landing site
-lat_target = lat0 - deg(30)   # [rad] Target latitude
-lon_target = lon0 - deg(2)  # [rad] Target longitude
+lat_target = lat0 + deg(15)   # [rad] Target latitude
+lon_target = lon0 - deg(0.2)  # [rad] Target longitude
 
 # Initial state vector: [r, lon, lat, V, gamma, psi]
 state0 = np.array([r0, lon0, lat0, V0, gam0, psi0])
@@ -177,8 +177,8 @@ SIGMA_DOT_DOT_MAX = deg(5.0)  # [rad/s²]
 # Terminal range-to-go constraint
 # We want to deploy parachute at specific distance from target
 RGO_TARGET = 0.0    # [m] Target range-to-go at deployment (0 km)
-RGO_TOLERANCE = 1.0e3  # [m] Allowable deviation (±1 km)
-                       # Final Rgo must be in [0, 1] km
+RGO_TOLERANCE = 2.0e3  # [m] Allowable deviation (±2 km)
+                       # Final Rgo must be in [0, 2] km
 
 # Parachute deployment window constraints
 # Must deploy within safe Mach number and dynamic pressure limits
@@ -252,17 +252,25 @@ def compute_spherical_metrics_casadi(lat, lon, lat_t, lon_t, R):
 # ============================================================
 # DIRECT COLLOCATION OPTIMIZATION
 # ============================================================
-def solve_collocation():
+def solve_collocation(lat_target_in=None, lon_target_in=None):
     """
     Solve trajectory optimization using direct collocation with CasADi.
     Uses Hermite-Simpson collocation for better accuracy.
+    
+    Args:
+        lat_target_in: Target latitude [rad] (optional, uses default if None)
+        lon_target_in: Target longitude [rad] (optional, uses default if None)
     """
+    # Use provided target or default values
+    lat_target_use = lat_target_in if lat_target_in is not None else lat_target
+    lon_target_use = lon_target_in if lon_target_in is not None else lon_target
+    
     print("\n" + "="*70)
     print("DIRECT COLLOCATION OPTIMIZATION WITH CASADI")
     print("="*70)
     print(f"Collocation segments: {N_SEGMENTS}")
     print(f"Integration timestep: {DT} s")
-    print(f"Target: lat={np.rad2deg(lat_target):.3f}°, lon={np.rad2deg(lon_target):.3f}°")
+    print(f"Target: lat={np.rad2deg(lat_target_use):.3f}°, lon={np.rad2deg(lon_target_use):.3f}°")
     print(f"Target Rgo at deployment: {RGO_TARGET/1e3:.1f} km")
     print("="*70)
     
@@ -388,7 +396,7 @@ def solve_collocation():
     lat_f = lat[-1]   # Final latitude
     lon_f = lon[-1]   # Final longitude
     # Compute great circle distance from final point to target
-    Rgo_f = compute_spherical_metrics_casadi(lat_f, lon_f, lat_target, lon_target, mars.radius)
+    Rgo_f = compute_spherical_metrics_casadi(lat_f, lon_f, lat_target_use, lon_target_use, mars.radius)
     # Constraint: Rgo must be 5 ± 2 km
     opti.subject_to(ca.fabs(Rgo_f - RGO_TARGET) <= RGO_TOLERANCE)
     
@@ -566,7 +574,7 @@ def solve_collocation():
         # Compute spherical geometry metrics
         # Returns: azimuth angles and distances (crossrange, downrange, range-to-go)
         _, _, _, RC_i, RD_i, RD_go_i, Rgo_i = spherical_metrics(
-            lat0, lon0, lat_i, lon_i, lat_target, lon_target, mars.radius
+            lat0, lon0, lat_i, lon_i, lat_target_use, lon_target_use, mars.radius
         )
         
         # Append to lists (will convert to arrays after loop)
