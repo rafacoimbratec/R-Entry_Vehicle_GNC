@@ -40,8 +40,8 @@ class MarsConstants:
 @dataclass
 class VehicleProperties:
     """Entry vehicle aerodynamic properties"""
-    L_over_D: float = 0.54  # Lift-to-drag ratio
-    beta: float = 379  # Ballistic coefficient [kg/m^2]
+    L_over_D: float = 0.24  # Lift-to-drag ratio
+    beta: float = 135  # Ballistic coefficient [kg/m^2]
     
     # Heat flux model constants
     N: float = 0.5
@@ -56,7 +56,7 @@ class InitialConditions:
     theta: float = -176.40167 * np.pi/180  # Initial longitude [rad]
     phi: float = -21.3 * np.pi/180  # Initial latitude [rad]
     V: float = 4700  # Initial velocity [m/s]
-    gamma: float = -10 * np.pi/180  # Initial flight path angle [rad]
+    gamma: float = -12 * np.pi/180  # Initial flight path angle [rad]
     psi: float = -2.8758 * np.pi/180  # Initial heading angle [rad]
 
 
@@ -388,8 +388,9 @@ class ReentrySimulation:
             results['RC'][i] = RC
             results['Rgo'][i] = Rgo
             
+            deploy_cond = 1.4 <= state.V/a <= 2.2 and 300.0 <= results['q'][i] <= 800.0
             # Check termination conditions
-            if state.h < 0:
+            if deploy_cond or state.h < 0:
                 # Trim arrays to actual simulation length
                 for key in results:
                     results[key] = results[key][:i+1]
@@ -693,7 +694,7 @@ def main():
         #de=10000.0,             # Energy step for propagation [J/kg] 10 KJ/kg
         #dsigma_deg=3.0          # Bank angle step for finite difference [deg]
     #)
-    guidance = constant_bank_guidance = ConstantBankGuidance(bank_angle_deg=100)
+    guidance = constant_bank_guidance = ConstantBankGuidance(bank_angle_deg=0)
     print(f"\nUsing guidance: {guidance}")
     
     # Alternative: Use constant bank guidance

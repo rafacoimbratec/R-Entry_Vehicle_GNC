@@ -80,7 +80,7 @@ def rk4_step(f, state, sigma, dt):
 # ============================================================
 # SIM CONFIG & LIMITS
 # ============================================================
-DT = 0.1
+DT = 0.5
 T_END = 1200.0
 
 # Initial conditions (your values)
@@ -92,8 +92,8 @@ gam0 = deg(-12.0)
 psi0 = deg(-2.8758)
 lat0 = deg(-21.3)
 lon0 = deg(-176.40167)
-lat_target = deg(0.276)
-lon_target = deg(-175.8)
+lat_target = deg(-5.4)
+lon_target = deg(-176.19)
 state0 = np.array([r0, lon0, lat0, V0, gam0, psi0])
 
 # Bank limits (magnitudes)

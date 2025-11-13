@@ -114,18 +114,107 @@ def spherical_metrics(lat0, lon0, lat, lon, lat_t, lon_t, Rplanet):
     return d_m, sin_d, cos_d, RC, RD, RD_go, Rgo
 
 
-# -------- Example usage (matches your MATLAB script) --------
+# -------- Example usage (three sanity cases with error printouts) --------
 if __name__ == "__main__":
     deg2rad = np.pi / 180.0
+    R = 3396.2e3  # Mars mean radius [m]
+
+    # Entry (reference) and target (same as your example)
     lat0  = -21.3 * deg2rad
     lon0  = -176.40167 * deg2rad
     lat_t =   0.276 * deg2rad
-    lon_t = -175.8 * deg2rad
+    lon_t = -175.8    * deg2rad
 
-    Mars_radius = 3396.2e3  # m (example value)
+    def sph2cart(lat, lon):
+        return np.array([np.cos(lat)*np.cos(lon), np.cos(lat)*np.sin(lon), np.sin(lat)])
 
+    def cart2sph(v):
+        x, y, z = v
+        lat = np.arctan2(z, np.hypot(x, y))
+        lon = np.arctan2(y, x)
+        return lat, lon
+
+    # Precompute entry->target arc and vectors
+    rE, rT = sph2cart(lat0, lon0), sph2cart(lat_t, lon_t)
+    arc_ET = np.arccos(np.clip(np.dot(rE, rT), -1.0, 1.0)) * R  # expected RD_go in Case 1
+
+    # ========= Case 1: Same point (lat=lat0, lon=lon0) =========
+    print("=== Case 1: Same point (lat=lat0, lon=lon0) ===")
+    lat_curr = lat0
+    lon_curr = lon0
     d, sin_d, cos_d, RC, RD, RD_go, Rgo = spherical_metrics(
-        lat0, lon0, 22.3 * deg2rad, 2 * deg2rad, lat_t, lon_t, Mars_radius
+        lat0, lon0, lat_curr, lon_curr, lat_t, lon_t, R
+    )
+    # expected
+    exp_d = 0.0
+    exp_RC = 0.0
+    exp_RD = 0.0
+    exp_RD_go = arc_ET
+    exp_Rgo = exp_RD_go
+
+    print("Everything")
+    print(f"d     = {d:.6f} m    | err_abs = {abs(d-exp_d):.6e}")
+    print(f"sin_d = {sin_d:.6f}")
+    print(f"cos_d = {cos_d:.6f}")
+    print(f"RC    = {RC:.6f} m  | err_abs = {abs(RC-exp_RC):.6e}")
+    print(f"RD    = {RD:.6f} m  | err_abs = {abs(RD-exp_RD):.6e}")
+    print(f"RD_go = {RD_go:.6f} m | err_abs = {abs(RD_go-exp_RD_go):.6e}")
+    print(f"Rgo   = {Rgo:.6f} m  | err_abs = {abs(Rgo-exp_Rgo):.6e}")
+    print("Done\n")
+
+    # ========= Case 2: On target great-circle (RC≈0, RD≈d) =========
+    print("=== Case 2: On target great-circle (RC≈0, RD≈d) ===")
+    # Slerp 1/3 of the way from entry to target along their great circle
+    cos_dtot = np.clip(np.dot(rE, rT), -1.0, 1.0)
+    dtot = np.arccos(cos_dtot)
+    f = 1.0/3.0
+    denom = np.sin(dtot) if dtot > 1e-12 else 1.0
+    v = (np.sin((1-f)*dtot)*rE + np.sin(f*dtot)*rT) / denom
+    lat_curr, lon_curr = cart2sph(v)
+    print(lat_curr / deg2rad, lon_curr / deg2rad)  # debug
+
+    d2, _, _, RC2, RD2, RD_go2, Rgo2 = spherical_metrics(
+        lat0, lon0, lat_curr, lon_curr, lat_t, lon_t, R
+    )
+    # expected (within numerical tolerance)
+    exp_d2 = f * dtot * R
+    exp_RC2 = 0.0
+    exp_RD2 = exp_d2
+    exp_RD_go2 = (1.0 - f) * dtot * R
+    exp_Rgo2 = exp_RD_go2
+
+    def rel_err(x, xexp):
+        return (abs(x - xexp) / max(abs(xexp), 1e-12))
+
+    print("Everything")
+    print(f"d     = {d2:.6f} m    | err_abs = {abs(d2-exp_d2):.6e}, err_rel = {rel_err(d2,exp_d2):.3e}")
+    print(f"RC    = {RC2:.6f} m  | err_abs = {abs(RC2-exp_RC2):.6e}")
+    print(f"RD    = {RD2:.6f} m  | err_abs = {abs(RD2-exp_RD2):.6e}, err_rel = {rel_err(RD2,exp_RD2):.3e}")
+    print(f"RD_go = {RD_go2:.6f} m | err_abs = {abs(RD_go2-exp_RD_go2):.6e}, err_rel = {rel_err(RD_go2,exp_RD_go2):.3e}")
+    print(f"Rgo   = {Rgo2:.6f} m  | err_abs = {abs(Rgo2-exp_Rgo2):.6e}, err_rel = {rel_err(Rgo2,exp_Rgo2):.3e}")
+    print("Done\n")
+
+    # ========= Case 3: Near 90° cross-range (stress denom, stays finite) =========
+    print("=== Case 3: Near 90° cross-range (finite results) ===")
+    # Construct rP so that plane angle i≈90° and central angle d≈90°
+    nOET = np.cross(rE, rT); nOET = nOET / np.linalg.norm(nOET)
+    m = np.cross(nOET, rE); m = m / np.linalg.norm(m)     # m ⟂ rE and ⟂ nOET
+    rP = np.cross(m, rE);   rP = rP / np.linalg.norm(rP)  # rE·rP = 0 ⇒ d ≈ 90°
+    lat_curr, lon_curr = cart2sph(rP)
+
+    d3, _, _, RC3, RD3, RD_go3, Rgo3 = spherical_metrics(
+        lat0, lon0, lat_curr, lon_curr, lat_t, lon_t, R
     )
 
-    print(f"Initial Range-to-Go: {Rgo/1000:.2f} km")
+    # expected (approximate, due to epsilon guard): d ≈ π/2 * R, RC ≈ π/2 * R, RD ≈ π/2 * R
+    exp_d3 = 0.5 * np.pi * R
+    exp_RC3 = 0.5 * np.pi * R
+    exp_RD3 = 0.5 * np.pi * R
+
+    print("Everything")
+    print(f"d     = {d3:.6f} m    | err_abs ≈ {abs(d3-exp_d3):.6e}, err_rel ≈ {rel_err(d3,exp_d3):.3e}")
+    print(f"RC    = {RC3:.6f} m  | err_abs ≈ {abs(RC3-exp_RC3):.6e}, err_rel ≈ {rel_err(RC3,exp_RC3):.3e}")
+    print(f"RD    = {RD3:.6f} m  | err_abs ≈ {abs(RD3-exp_RD3):.6e}, err_rel ≈ {rel_err(RD3,exp_RD3):.3e}")
+    print(f"RD_go = {RD_go3:.6f} m (finite)")
+    print(f"Rgo   = {Rgo3:.6f} m  (finite)")
+    print("Done")
