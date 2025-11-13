@@ -85,7 +85,7 @@ T_END = 1200.0
 
 # Initial conditions (your values)
 deg = np.deg2rad
-h0   = 120e3
+h0   = 125e3
 r0   = mars.radius + h0
 V0   = 4700.0
 gam0 = deg(-12.0)
