@@ -55,7 +55,7 @@ class InitialConditions:
     h: float = 125e3  # Initial altitude [m]
     theta: float = -176.40167 * np.pi/180  # Initial longitude [rad]
     phi: float = -21.3 * np.pi/180  # Initial latitude [rad]
-    V: float = 4700  # Initial velocity [m/s]
+    V: float = 5500  # Initial velocity [m/s]
     gamma: float = -12 * np.pi/180  # Initial flight path angle [rad]
     psi: float = -2.8758 * np.pi/180  # Initial heading angle [rad]
 
@@ -63,17 +63,17 @@ class InitialConditions:
 @dataclass
 class TargetConditions:
     """Target conditions for the reentry vehicle"""
-    theta: float = -175.8 * np.pi/180  # Target longitude [rad]
-    phi: float = 0.276 * np.pi/180  # Target latitude [rad]
-    V: float = 450  # Final velocity [m/s]
-    h: float = 2480  # Final altitude [m]
+    theta: float = -176.531 * np.pi/180  # Target longitude [rad]
+    phi: float = -7.489 * np.pi/180  # Target latitude [rad]
+    V: float = 929  # Final velocity [m/s]
+    h: float = 28.93e3  # Final altitude [m]
     Rgo_target: float = 5e3  # Maximum allowable targeting error [m]
 
 
 @dataclass
 class PathConstraints:
     """Path constraints for the reentry vehicle"""
-    A_max: float = 4  # Maximum acceleration [m/s^2] (4g in m/s^2)
+    A_max: float = 15  # Maximum acceleration [m/s^2] (4g in m/s^2)
     q_max: float = 13e3  # Maximum dynamic pressure [Pa]
     Qdot_max: float = 500e3  # Maximum heat rate [W/m^2]
 
@@ -390,7 +390,7 @@ class ReentrySimulation:
             
             deploy_cond = 1.4 <= state.V/a <= 2.2 and 300.0 <= results['q'][i] <= 800.0
             # Check termination conditions
-            if deploy_cond or state.h < 0:
+            if deploy_cond or state.h < 6:
                 # Trim arrays to actual simulation length
                 for key in results:
                     results[key] = results[key][:i+1]
@@ -685,17 +685,17 @@ def main():
     print(f"\nInitial Range-to-Go: {Rgo/1e3:.2f} km")
     
     # Create LNPCG guidance
-    #guidance = LNPCGuidance(
-        #sigma_f_deg=40.0,        # Final bank angle at terminal energy [deg]
-        #e_f=mars.mu/(mars.radius+target.h) - 0.5*target.V**2,  # Terminal energy [J/kg]
-        #activation_time=175.0,  # Activate guidance after 170 seconds
-        #max_iter=25,            # Maximum Newton-Raphson iterations
-        #epsilon=100.0,          # Convergence tolerance [m]
-        #de=10000.0,             # Energy step for propagation [J/kg] 10 KJ/kg
-        #dsigma_deg=3.0          # Bank angle step for finite difference [deg]
-    #)
-    guidance = constant_bank_guidance = ConstantBankGuidance(bank_angle_deg=0)
-    print(f"\nUsing guidance: {guidance}")
+    guidance = LNPCGuidance(
+        sigma_f_deg=40.0,        # Final bank angle at terminal energy [deg]
+        e_f=mars.mu/(mars.radius+target.h) - 0.5*target.V**2,  # Terminal energy [J/kg]
+        activation_time=0.0,  # Activate guidance after 170 seconds
+        max_iter=25,            # Maximum Newton-Raphson iterations
+        epsilon=100.0,          # Convergence tolerance [m]
+        de=10000.0,             # Energy step for propagation [J/kg] 10 KJ/kg
+        dsigma_deg=3.0          # Bank angle step for finite difference [deg]
+    )
+    #guidance = constant_bank_guidance = ConstantBankGuidance(bank_angle_deg=0)
+    #print(f"\nUsing guidance: {guidance}")
     
     # Alternative: Use constant bank guidance
     # guidance = ConstantBankGuidance(bank_angle_deg=100.0)

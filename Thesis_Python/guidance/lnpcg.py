@@ -24,7 +24,7 @@ class LNPCGuidance(BaseGuidance):
     
     def __init__(self, 
                  sigma_f_deg: float = 0.0,
-                 e_f: float = 12500221.74785505,
+                 e_f: float = 12072638.46622902,
                  activation_time: float = 170.0,
                  max_iter: int = 50,
                  epsilon: float = 100.0,

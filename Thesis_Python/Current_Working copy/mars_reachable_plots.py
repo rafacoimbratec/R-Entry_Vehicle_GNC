@@ -173,17 +173,18 @@ def compute_loads(state):
 
 def deploy_trigger(h, V, q):
     """
-    Original deploy rule based on Mach and dynamic pressure:
+    Deploy rule based on Mach, dynamic pressure, and altitude:
 
       - 1.4 <= Mach <= 2.2
       - 300 Pa <= q <= 800 Pa
+      - h >= 6 km (6000 m)
       OR impact (h <= 0)
     """
     a = mars.sound_speed(h)
     a_safe = max(a, 1e-6)
     mach = V / a_safe
 
-    return ((1.4 <= mach <= 2.2) and (300.0 <= q <= 800.0)) or (h <= 6.0)
+    return ((1.4 <= mach <= 2.2) and (300.0 <= q <= 800.0) or (h <= 6000.0))
 
 # ============================================================
 # Safe simulation with path constraints
@@ -234,7 +235,7 @@ def simulate_entry_safe(initial_state,
     max_Qdot = 0.0
     violated = False
 
-    while t < t_actual + dt:  # Slightly beyond to ensure we reach deployment
+    while t < tmax:  # Slightly beyond to ensure we reach deployment
         sigma = bank_profile_three_section(t, t_actual, sigma1, sigma2)
         state = rk4_step(eom, state, sigma, dt)
 
@@ -599,8 +600,9 @@ if __name__ == "__main__":
             q_hist = []
             A_hist = []
             Qdot_hist = []
+            mach_hist = []
             
-            while t < t_actual + dt_sim:
+            while t < tmax_sim:
                 sigma = bank_profile_three_section(t, t_actual, sigma1_rad, sigma2_rad)
                 state = rk4_step(eom, state, sigma, dt_sim)
                 t += dt_sim
@@ -615,8 +617,14 @@ if __name__ == "__main__":
                 A_hist.append(A_total)
                 Qdot_hist.append(Qdot)
                 
+                # Compute Mach number
+                a = mars.sound_speed(h)
+                mach = V / max(a, 1e-6)
+                mach_hist.append(mach)
+                
                 r, th, ph, V, gam, psi = state
                 if deploy_trigger(h, V, q):
+                    print(f"Mach at deployment: {mach:.2f}")
                     print(f"Deployment triggered at t={t:.2f} s")
                     break
             
@@ -626,6 +634,7 @@ if __name__ == "__main__":
             q_hist = np.array(q_hist)
             A_hist = np.array(A_hist)
             Qdot_hist = np.array(Qdot_hist)
+            mach_hist = np.array(mach_hist)
             
             # ============================================================
             # PLOT BEST TRAJECTORY
@@ -743,6 +752,18 @@ if __name__ == "__main__":
             ax_heat.set_title('Heat Rate History', fontsize=13, fontweight='bold')
             ax_heat.legend(fontsize=10)
             ax_heat.grid(True, alpha=0.3)
+            plt.tight_layout()
+            
+            # Figure: Mach number
+            fig_mach, ax_mach = plt.subplots(figsize=(10, 5))
+            ax_mach.plot(times[1:], mach_hist, 'purple', lw=2, label='Mach Number')
+            ax_mach.axhline(1.4, ls='--', color='green', alpha=0.5, label='Deploy Min (M=1.4)')
+            ax_mach.axhline(2.2, ls='--', color='blue', alpha=0.5, label='Deploy Max (M=2.2)')
+            ax_mach.set_xlabel('Time [s]', fontsize=11)
+            ax_mach.set_ylabel('Mach Number', fontsize=11)
+            ax_mach.set_title('Mach Number History', fontsize=13, fontweight='bold')
+            ax_mach.legend(fontsize=10)
+            ax_mach.grid(True, alpha=0.3)
             plt.tight_layout()
             
         else:

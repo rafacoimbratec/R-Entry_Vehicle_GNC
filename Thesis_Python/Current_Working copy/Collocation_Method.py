@@ -145,7 +145,7 @@ def rk4_step(f, state, sigma, dt):
 # This section defines the optimization problem setup
 
 # Collocation discretization parameters
-DT = 0.5           # [s] Integration timestep (not used directly, dt is optimized)
+DT = 0.25           # [s] Integration timestep (not used directly, dt is optimized)
 N_SEGMENTS = 100   # Number of collocation segments
                    # More segments = higher fidelity but more decision variables
                    # 100 segments → 707 decision variables total
@@ -174,13 +174,13 @@ SIGMA_MAX = deg(81.0)      # [rad] Maximum bank angle (with 10% margin)
 SIGMA_DOT_MAX = deg(20.0)  # [rad/s] Maximum bank angle rate
 SIGMA_DOT_MIN = -deg(20.0) # [rad/s] Minimum bank angle rate
 SIGMA_DOT_DOT_MAX = deg(5.0)  # [rad/s²]
-SIGMA_DOT_DOT_MIN = -deg(5.0)
+SIGMA_DOT_DOT_MIN = -deg(-5.0)
                            # Limits how fast vehicle can roll
 
 # Objective function weights
 # Maximize altitude while minimizing gamma^2 for control authority
-W_ALTITUDE = 1.0      # Weight for altitude maximization
-W_GAMMA = 95        # Weight for gamma^2 minimization (control authority)
+W_ALTITUDE = 0.00001      # Weight for altitude maximization
+W_GAMMA = 1.0        # Weight for gamma^2 minimization (control authority)
 
 # ============================================================
 # CASADI SYMBOLIC DYNAMICS
@@ -432,11 +432,11 @@ def solve_collocation(lat_target_in=None, lon_target_in=None):
     for k in range(N_SEGMENTS):
         # Determine bank angle based on bang-bang structure
         if k < switch_1:
-            sigma_k = deg(0)      # Phase 1: 0 degrees (straight)
+            sigma_k = deg(69)      # Phase 1: 0 degrees (straight)
         elif k < switch_2:
-            sigma_k = deg(81)     # Phase 2: +81 degrees (right roll, 10% margin)
+            sigma_k = deg(35)     # Phase 2: +81 degrees (right roll, 10% margin)
         elif k < switch_3:
-            sigma_k = deg(-81)    # Phase 3: -81 degrees (left roll, 10% margin)
+            sigma_k = deg(9)    # Phase 3: -81 degrees (left roll, 10% margin)
         else:
             sigma_k = deg(0)      # Phase 4: 0 degrees (straight)
         

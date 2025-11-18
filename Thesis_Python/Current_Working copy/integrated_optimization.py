@@ -56,6 +56,18 @@ class Constraints:
     q_max: float = 13000.0
     A_max: float = 15.0
     Qdot_max: float = 500000.0
+    
+@dataclass
+class DeployRegion:
+    """Parachute deployment envelope (single source of truth)."""
+    mach_min: float = 1.4
+    mach_max: float = 2.2
+    q_min: float = 300.0      # Pa
+    q_max: float = 800.0      # Pa
+    h_min: float = 6e3        # m (minimum deployment altitude)
+
+deploy_region = DeployRegion()
+
 
 mars = Mars()
 veh = Vehicle()
@@ -147,12 +159,21 @@ def compute_loads(state):
     
     return h, rho, q, A_total, Qdot
 
-def deploy_trigger(h, V, q):
-    """Deployment trigger based on Mach and dynamic pressure."""
+def deploy_trigger(h, V, q, mars=mars, region=deploy_region):
+    """Deployment trigger based on unified Mach/q/altitude envelope."""
     a = mars.sound_speed(h)
     a_safe = max(a, 1e-6)
     mach = V / a_safe
-    return ((1.4 <= mach <= 2.2) and (300.0 <= q <= 800.0)) or (h <= 0.0)
+
+    in_box = (
+        (region.mach_min <= mach <= region.mach_max) and
+        (region.q_min    <= q    <= region.q_max) and
+        (h >= region.h_min)
+    )
+
+    # h <= 0 is still a hard stop in the integrator
+    return in_box or (h <= 6.0e3)
+
 
 def simulate_entry_safe(initial_state, dt=0.25, tmax=2000.0,
                         sigma1=np.deg2rad(75.0), sigma2=np.deg2rad(-75.0),
@@ -183,7 +204,7 @@ def simulate_entry_safe(initial_state, dt=0.25, tmax=2000.0,
     max_Qdot = 0.0
     violated = False
     
-    while t < t_actual + dt:
+    while t < tmax:
         sigma = bank_profile_three_section(t, t_actual, sigma1, sigma2)
         state = rk4_step(eom_numpy, state, sigma, dt)
         
@@ -235,7 +256,8 @@ def build_reachable_set(lat0, lon0, sigma1_grid, sigma2_grid,
             all_samples.append([
                 lat_f, lon_f, h_f/1e3,  # lat, lon, altitude [km]
                 max_q, max_A, max_Qdot,  # max loads
-                np.rad2deg(s1), np.rad2deg(s2)  # control parameters [deg]
+                np.rad2deg(s1), np.rad2deg(s2),  # control parameters [deg]
+                t_f  # trajectory duration [s]
             ])
             #print(f"Sample ({i+1},{j+1}): h_final={h_f/1e3:7.2f} km, max_q={max_q:8.1f} Pa, max_A={max_A:5.2f} g, max_Qdot={max_Qdot:8.1f} W/m^2, violated={violated}")
     
@@ -259,6 +281,7 @@ def find_best_target(all_samples, lat0, lon0):
     Qdot_all = all_samples[:, 5]
     sigma1_all = all_samples[:, 6]
     sigma2_all = all_samples[:, 7]
+    t_all = all_samples[:, 8]
     
     # Compute downrange/crossrange
     lat_ref = lat0 + np.deg2rad(1.0)
@@ -302,6 +325,7 @@ def find_best_target(all_samples, lat0, lon0):
     Qdot_valid = Qdot_all[valid_mask]
     sigma1_valid = sigma1_all[valid_mask]
     sigma2_valid = sigma2_all[valid_mask]
+    t_valid = t_all[valid_mask]
     
     # Cost function: maximize altitude
     cost = -ALT_valid
@@ -317,7 +341,8 @@ def find_best_target(all_samples, lat0, lon0):
         'max_A': A_valid[best_idx],
         'max_Qdot': Qdot_valid[best_idx],
         'sigma1': sigma1_valid[best_idx],
-        'sigma2': sigma2_valid[best_idx]
+        'sigma2': sigma2_valid[best_idx],
+        't_final': t_valid[best_idx]
     }
     
     print(f"\nBest target selected:")
@@ -330,6 +355,7 @@ def find_best_target(all_samples, lat0, lon0):
     print(f"  Max A:        {best_target['max_A']:5.2f} g")
     print(f"  Max Qdot:     {best_target['max_Qdot']:8.1f} W/m²")
     print(f"  Control: σ1={best_target['sigma1']:6.2f}°, σ2={best_target['sigma2']:6.2f}°")
+    print(f"  Time:         {best_target['t_final']:.1f} s")
     
     return best_target, all_samples, RD_all, RC_all
 
@@ -371,7 +397,7 @@ def solve_collocation_with_target(best_target):
     print("DIRECT COLLOCATION OPTIMIZATION")
     print("="*80)
     
-    N_SEGMENTS = 100
+    N_SEGMENTS = 200
     lat_target = best_target['lat']
     lon_target = best_target['lon']
     
@@ -396,13 +422,45 @@ def solve_collocation_with_target(best_target):
     sigma = U[0, :]
     
     # Objective: maximize altitude while minimizing gamma^2
-    W_ALTITUDE = 1.0
-    W_GAMMA = 94.0
-    
+    # Objective weights (rescaled)
+    W_ALTITUDE = 1e-3     # h in meters → scale down
+    W_GAMMA    = 1.0
+    W_DEPLOY   = 10.0     # how strongly we prefer the middle of the deploy box
+
     h_final = r[-1] - mars.radius
     gam_final = gam[-1]
-    
-    objective = -W_ALTITUDE * h_final + W_GAMMA * gam_final**2
+    V_f = V[-1]
+
+    # Terminal Mach/q again
+    rho_f = mars.rho0 * ca.exp(-h_final / mars.Hs)
+    q_f   = 0.5 * rho_f * V_f**2
+
+    h_km_f = h_final / 1e3
+    T_f = 1.4e-13 * h_km_f**3 - 8.85e-9 * h_km_f**2 - 1.245e-3 * h_km_f + 205.36
+    a_sound_f = ca.sqrt(mars.gamma_gas * mars.R_gas * ca.fmax(T_f, 1.0))
+    mach_f = V_f / ca.fmax(a_sound_f, 1e-6)
+    MACH_MIN = deploy_region.mach_min
+    MACH_MAX = deploy_region.mach_max
+    Q_MIN    = deploy_region.q_min
+    Q_MAX    = deploy_region.q_max
+    H_MIN    = deploy_region.h_min
+
+    # Center of deploy box (Mach and q)
+    mach_c = 0.5 * (MACH_MIN + MACH_MAX)
+    q_c    = 0.5 * (Q_MIN    + Q_MAX)
+
+    # Normalized offsets from center
+    mach_norm = (mach_f - mach_c) / (0.5 * (MACH_MAX - MACH_MIN) + 1e-6)
+    q_norm    = (q_f    - q_c   ) / (0.5 * (Q_MAX    - Q_MIN   ) + 1e-6)
+
+    objective = 0
+    # maximize altitude
+    objective += -W_ALTITUDE * h_final
+    # penalize very steep final gamma (optional; you can turn this off if you want)
+    objective += W_GAMMA * gam_final**2
+    # keep deployment near the middle of the Mach / q box
+    objective += W_DEPLOY * (mach_norm**2 + q_norm**2)
+
     opti.minimize(objective)
     
     # Boundary conditions
@@ -417,8 +475,8 @@ def solve_collocation_with_target(best_target):
     c = 2 * ca.atan2(ca.sqrt(a), ca.sqrt(1-a))
     miss_distance = mars.radius * c
     
-    # Hard constraint: miss distance must be less than 1 km
-    opti.subject_to(miss_distance <= 1000.0)
+    # Hard constraint: miss distance must be less than 10 km
+    opti.subject_to(miss_distance <= 5000.0)
     
     # Dynamics constraints (Hermite-Simpson)
     for k in range(N_SEGMENTS):
@@ -458,11 +516,14 @@ def solve_collocation_with_target(best_target):
     opti.subject_to(opti.bounded(0.1, dt, 5.0))
     
     # Terminal constraints (deployment envelope)
-    MACH_MIN = 1.1
-    MACH_MAX = 2.2
-    Q_MIN = 300.0
-    Q_MAX = 800.0
-    H_MIN = 6.0e3
+    # Terminal constraints (deployment envelope)
+    # Terminal constraints (deployment envelope) – unified with deploy_region
+    MACH_MIN = deploy_region.mach_min
+    MACH_MAX = deploy_region.mach_max
+    Q_MIN    = deploy_region.q_min
+    Q_MAX    = deploy_region.q_max
+    H_MIN    = deploy_region.h_min
+
     
     r_f = r[-1]
     V_f = V[-1]
@@ -483,37 +544,94 @@ def solve_collocation_with_target(best_target):
     # Initial guess from reachable set
     print("Generating initial guess from reachable set parameters...")
     
+    sigma1_rad = np.deg2rad(best_target['sigma1'])
+    sigma2_rad = np.deg2rad(best_target['sigma2'])
+    
+    # Use trajectory duration from reachable set (no need to re-estimate)
+    t_actual = best_target['t_final']
+    print(f"Using trajectory duration from reachable set: {t_actual:.1f} s")
+    
+    # Generate initial guess with properly normalized bank profile
     state_sim = state0.copy()
     X_guess = np.zeros((6, N_SEGMENTS + 1))
     X_guess[:, 0] = state0
     
-    dt_guess = 1.5
-    sigma1_rad = np.deg2rad(best_target['sigma1'])
-    sigma2_rad = np.deg2rad(best_target['sigma2'])
+    def eval_terminal_from_guess(X_guess):
+        r_f = X_guess[0, -1]
+        lon_f = X_guess[1, -1]
+        lat_f = X_guess[2, -1]
+        V_f = X_guess[3, -1]
+        gam_f = X_guess[4, -1]
+        psi_f = X_guess[5, -1]
+
+        h_f = r_f - mars.radius
+        rho_f = mars.rho0 * np.exp(-h_f / mars.Hs)
+        q_f = 0.5 * rho_f * V_f**2
+
+        h_km_f = h_f / 1e3
+        T_f = 1.4e-13 * h_km_f**3 - 8.85e-9 * h_km_f**2 - 1.245e-3 * h_km_f + 205.36
+        a_f = np.sqrt(mars.gamma_gas * mars.R_gas * max(T_f, 1.0))
+        mach_f = V_f / max(a_f, 1e-6)
+
+        # miss distance using same formula as in the Opti problem
+        dlat = lat_f - best_target['lat']
+        dlon = lon_f - best_target['lon']
+        a = np.sin(dlat/2)**2 + np.cos(lat_f)*np.cos(best_target['lat'])*np.sin(dlon/2)**2
+        c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+        miss_distance = mars.radius * c   # [m]
+        print("---- INITIAL GUESS TERMINAL STATE ----")
+        print(f"h_f        = {h_f/1e3:.2f} km (limit >= {deploy_region.h_min/1e3:.2f} km)")
+        print(f"Mach_f     = {mach_f:.3f} (limits [{deploy_region.mach_min}, {deploy_region.mach_max}])")
+        print(f"q_f        = {q_f:.1f} Pa (limits [{deploy_region.q_min}, {deploy_region.q_max}])")
+        print(f"miss_dist  = {miss_distance/1e3:.2f} km (limit <= 5.00 km)")
+        print(f"gamma_f    = {np.rad2deg(gam_f):.2f} deg")
     
-    # Estimate total time
-    t_total_guess = N_SEGMENTS * dt_guess
+    # Use actual trajectory duration to determine dt
+    dt_guess = (t_actual+0.25) / N_SEGMENTS
+    print(f"Initial dt guess: {dt_guess:.3f} s/segment (total time: {t_actual:.1f} s)")
     
+    # Now the bank profile is properly timed
+    deployed = False
     for k in range(N_SEGMENTS):
         t_k = k * dt_guess
-        sigma_k = bank_profile_three_section(t_k, t_total_guess, sigma1_rad, sigma2_rad)
+        sigma_k = bank_profile_three_section(t_k, t_actual, sigma1_rad, sigma2_rad)
+        print(f"Segment {k+1}/{N_SEGMENTS}, t={t_k:.1f}s, sigma={np.rad2deg(sigma_k):.2f} deg")
         state_sim = rk4_step(eom_numpy, state_sim, sigma_k, dt_guess)
         X_guess[:, k+1] = state_sim
+        
+        # Check deployment trigger
+        h_sim, _, q_sim, _, _ = compute_loads(state_sim)
+        V_sim = state_sim[3]
+        if deploy_trigger(h_sim, V_sim, q_sim):
+            deployed = True
+            # Fill remaining segments with final state
+            for j in range(k+2, N_SEGMENTS+1):
+                X_guess[:, j] = state_sim
+            print(f"Deployment conditions met at segment {k+1}/{N_SEGMENTS} (t={t_k:.1f}s)")
+            break
+    
+    if not deployed:
+        print(f"WARNING: Deployment conditions not met within {N_SEGMENTS} segments")
     
     print(f"Initial guess: h_final = {(X_guess[0,-1] - mars.radius)/1e3:.1f} km")
+    print(f"Initial guess: gamma_final = {np.rad2deg(X_guess[4,-1]):.1f} deg")
     
     opti.set_initial(X, X_guess)
+    eval_terminal_from_guess(X_guess)
     
-    # Control initial guess
+    # Control initial guess with properly normalized bank profile
     U_guess = np.zeros((1, N_SEGMENTS))
     for k in range(N_SEGMENTS):
         t_k = k * dt_guess
-        U_guess[0, k] = bank_profile_three_section(t_k, t_total_guess, sigma1_rad, sigma2_rad)
-        print(f"Initial guess control[{k}]: {np.rad2deg(U_guess[0,k]):.2f}°")
+        U_guess[0, k] = bank_profile_three_section(t_k, t_actual, sigma1_rad, sigma2_rad)
     
     opti.set_initial(U, U_guess)
-    opti.set_initial(dt, 1.5)
-    
+    # After computing dt_guess:
+    opti.set_initial(dt, dt_guess)
+
+    # Replace your old dt bounds with tighter ones:
+    opti.subject_to(opti.bounded(0.5 * dt_guess, dt, 1.5 * dt_guess))
+
     # Solver options
     opts = {
         'ipopt.print_level': 5,
@@ -815,47 +933,54 @@ def plot_comprehensive_results(best_target, all_samples, RD_all, RC_all, hist_op
     axes3[2].legend(fontsize=10)
     axes3[2].grid(True, alpha=0.3)
     
-    # Altitude-Velocity envelope
-    V_range = np.linspace(300, 500, 500)
-    h_mach_min = []
-    h_mach_max = []
-    h_q_min = []
-    h_q_max = []
-    
-    for V_i in V_range:
-        # Mach constraints
-        a_guess = 240.0
-        h_km_1 = (V_i / 1.0 - a_guess) * 11.1
-        h_km_4 = (V_i / 4.0 - a_guess) * 11.1
-        h_mach_min.append(max(0, h_km_1))
-        h_mach_max.append(max(0, h_km_4))
-        
-        # q constraints
-        h_q_300 = -11.1 * np.log(2 * 300.0 / (0.02 * V_i**2))
-        h_q_800 = -11.1 * np.log(2 * 800.0 / (0.02 * V_i**2))
-        h_q_min.append(max(0, h_q_300 / 1e3))
-        h_q_max.append(max(0, h_q_800 / 1e3))
-    
-    h_mach_min = np.array(h_mach_min)
-    h_mach_max = np.array(h_mach_max)
-    h_q_min = np.array(h_q_min)
-    h_q_max = np.array(h_q_max)
-    
-    H_MIN = 6.0
-    h_lower = np.maximum.reduce([h_mach_max, h_q_max, np.full_like(V_range, H_MIN)])
-    h_upper = np.minimum.reduce([h_mach_min, h_q_min])
-    
-    axes3[3].fill_between(V_range, h_lower, h_upper, alpha=0.3, color='green', label='Safe Envelope')
-    axes3[3].plot(V_range, h_lower, 'g-', lw=2)
-    axes3[3].plot(V_range, h_upper, 'g-', lw=2)
+     # Altitude-Velocity envelope (consistent with deploy_region)
+    V_range = np.linspace(300.0, 500.0, 300)   # [m/s]
+    h_grid  = np.linspace(deploy_region.h_min, 20e3, 400)  # [m]
+
+    h_lower = np.full_like(V_range, np.nan, dtype=float)
+    h_upper = np.full_like(V_range, np.nan, dtype=float)
+
+    for i, V_i in enumerate(V_range):
+        # Atmospheric quantities on the altitude grid
+        rho = mars.rho0 * np.exp(-h_grid / mars.Hs)
+        q   = 0.5 * rho * V_i**2
+
+        # Mach number using the same sound speed model
+        a = np.array([mars.sound_speed(h) for h in h_grid])
+        mach = V_i / np.maximum(a, 1e-6)
+
+        mask = (
+            (deploy_region.mach_min <= mach) &
+            (mach <= deploy_region.mach_max) &
+            (deploy_region.q_min    <= q) &
+            (q <= deploy_region.q_max)
+        )
+
+        if np.any(mask):
+            h_valid_km = h_grid[mask] / 1e3
+            h_lower[i] = h_valid_km.min()
+            h_upper[i] = h_valid_km.max()
+
+    valid = ~np.isnan(h_lower) & ~np.isnan(h_upper)
+
+    axes3[3].fill_between(
+        V_range[valid], h_lower[valid], h_upper[valid],
+        alpha=0.3, color='green', label='Safe Envelope'
+    )
+    axes3[3].plot(V_range[valid], h_lower[valid], 'g-', lw=2)
+    axes3[3].plot(V_range[valid], h_upper[valid], 'g-', lw=2)
+
+    # Plot trajectory and final deployment point
     axes3[3].plot(V, h, 'k-', lw=2.5, label='Trajectory', zorder=5)
     axes3[3].plot(V[-1], h[-1], 'r*', ms=20, label='Deployment', zorder=10,
                   markeredgecolor='darkred', markeredgewidth=1.5)
+
     axes3[3].set_xlabel('Velocity [m/s]', fontsize=11)
     axes3[3].set_ylabel('Altitude [km]', fontsize=11)
     axes3[3].set_title('Altitude-Velocity Envelope', fontsize=12, fontweight='bold')
     axes3[3].legend(fontsize=10)
     axes3[3].grid(True, alpha=0.3)
+
     
     plt.suptitle('Path Constraints Verification', fontsize=14, fontweight='bold', y=0.995)
     plt.tight_layout()
