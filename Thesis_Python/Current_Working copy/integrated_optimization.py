@@ -1,33 +1,43 @@
 """
-Integrated Optimization Script
-================================
-This script combines the reachable set analysis with direct collocation optimization:
+Mars Entry Integrated Optimization (Clean Version)
+==================================================
 
-1. Run mars_reachable_plots to find best feasible target
-2. Use best target to constrain collocation optimization
-3. Initialize collocation with control parameters from reachable set
-4. Plot comprehensive results including:
-   - Reachable set footprints (lat/lon and downrange/crossrange)
+Pipeline:
+1. Build reachable set over (σ1, σ2) grid using a two-pass simulation:
+   - First pass: approximate deploy time
+   - Second pass: re-simulate with bank profile normalized to deploy time
+
+2. Select "best" target:
+   - Path constraints satisfied (q, A, Qdot)
+   - Optional crossrange restriction
+   - Maximum deploy altitude
+
+3. Optimize trajectory using direct collocation (CasADi):
+   - Terminal position within tolerance of best target
+   - Final state in deploy envelope
+   - Path constraints on q, A, Qdot
+   - Bank angle / rate / acceleration constraints
+   - Objective: maximize final altitude and shape γ and deploy conditions
+
+4. Plot:
+   - Reachable set footprints (lat/lon + metrics)
+   - Candidate trajectory (from reachable set)
    - Optimized trajectory time histories
-   - Ground track comparison
-   - Deployment envelope
-   - Path constraints verification
+   - Ground track & diagnostic plots
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
-from dataclasses import dataclass
 import casadi as ca
-import time
+from dataclasses import dataclass
 from spherical_metrics import spherical_metrics
 
 # ============================================================
-# MODELS & CONSTANTS (shared between both methods)
+# 1️⃣ MODELS & CONSTANTS
 # ============================================================
 
 @dataclass
 class Mars:
-    """Mars atmospheric and gravitational model."""
     radius: float = 3396.2e3
     mu: float = 4.282837e13
     rho0: float = 0.02
@@ -35,1035 +45,1173 @@ class Mars:
     omega: float = 7.088e-5
     gamma_gas: float = 1.3
     R_gas: float = 191.0
-    
+
+    def density(self, h):
+        return self.rho0 * np.exp(-h / self.Hs)
+
     def sound_speed(self, h):
+        """Simple polynomial-based temperature → sound speed model."""
         h_km = h / 1e3
-        T = 1.4e-13 * h_km**3 - 8.85e-9 * h_km**2 - 1.245e-3 * h_km + 205.36
+        T = 1.4e-13*h_km**3 - 8.85e-9*h_km**2 - 1.245e-3*h_km + 205.36
         return np.sqrt(self.gamma_gas * self.R_gas * max(T, 1.0))
 
 @dataclass
 class Vehicle:
-    """Entry vehicle properties."""
-    beta: float = 135.0
+    beta: float = 135.0          # ballistic coefficient
     L_over_D: float = 0.24
     k_heat_flux: float = 5.3697e-5
     N: float = 0.5
-    M: float = 3.15
+    M: float = 3.0
 
 @dataclass
 class Constraints:
-    """Path constraints."""
-    q_max: float = 13000.0
-    A_max: float = 15.0
-    Qdot_max: float = 500000.0
-    
+    q_max: float = 13000.0       # Pa
+    A_max: float = 15.0          # g
+    Qdot_max: float = 5e5        # W/m^2
+    sigma_max: float = 81.0      # deg
+    sigma_dot_max: float = 20.0  # deg/s
+    sigma_ddot_max: float = 5.0  # deg/s^2
+
 @dataclass
 class DeployRegion:
-    """Parachute deployment envelope (single source of truth)."""
     mach_min: float = 1.4
     mach_max: float = 2.2
-    q_min: float = 300.0      # Pa
-    q_max: float = 800.0      # Pa
-    h_min: float = 6e3        # m (minimum deployment altitude)
-
-deploy_region = DeployRegion()
+    q_min: float = 300.0         # Pa
+    q_max: float = 800.0         # Pa
+    h_min: float = 6e3           # m
 
 
 mars = Mars()
 veh = Vehicle()
-constraints = Constraints()
+cons = Constraints()
+deploy = DeployRegion()
 
-# Entry conditions
+# Entry state
 deg = np.deg2rad
 h0 = 125e3
 r0 = mars.radius + h0
-V0_reachable = 5000.0  # For reachable set
-V0_collocation = 5000.0  # For collocation
+V0 = 5000.0
 gam0 = deg(-12.0)
 psi0 = deg(-2.8758)
-lat0 = deg(-21.5)
+lat0 = deg(-21.3)
 lon0 = deg(-176.40167)
 
-# Control limits
-SIGMA_MIN = deg(-81.0)
-SIGMA_MAX = deg(81.0)
-SIGMA_DOT_MAX = deg(20.0)
-SIGMA_DOT_MIN = -deg(20.0)
-SIGMA_DOT_DOT_MAX = deg(5.0)
-SIGMA_DOT_DOT_MIN = -deg(5.0)
+state0 = np.array([r0, lon0, lat0, V0, gam0, psi0])
 
 # ============================================================
-# REACHABLE SET FUNCTIONS (from mars_reachable_plots.py)
+# 2️⃣ BASIC UTILITIES
 # ============================================================
 
-def bank_profile_three_section(t, t_total, sigma1, sigma2):
-    """Three-section bank angle profile."""
-    t1 = 0.35 * t_total
-    t2 = 0.50 * t_total
-    
-    if t < t1:
-        return sigma1
-    elif t < t2:
-        return sigma1 * (t2 - t) / (t2 - t1)
-    else:
-        return sigma2
+def great_circle_distance(lat1, lon1, lat2, lon2, R):
+    """Great-circle distance [m] between points (radians)."""
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = np.sin(dlat/2)**2 + np.cos(lat1)*np.cos(lat2)*np.sin(dlon/2)**2
+    c = 2*np.arctan2(np.sqrt(a), np.sqrt(1-a))
+    return R*c
+
+# ============================================================
+# 3️⃣ DYNAMICS & LOADS (NumPy)
+# ============================================================
 
 def eom_numpy(state, sigma):
-    """3DOF equations of motion (NumPy version)."""
-    r, th, ph, V, gam, psi = state
-    
+    """3DOF equations of motion including planetary rotation."""
+    r, lon, lat, V, gam, psi = state
     g = mars.mu / r**2
-    rho = mars.rho0 * np.exp(-(r - mars.radius) / mars.Hs)
-    D = 0.5 * rho * V**2 / max(veh.beta, 1e-9)
+    h = r - mars.radius
+    rho = mars.density(h)
+
+    D = 0.5 * rho * V**2 / veh.beta
     L = veh.L_over_D * D
     Vh = V * np.cos(gam)
-    
-    r_dot = V * np.sin(gam)
-    th_dot = (Vh * np.sin(psi)) / (r * max(np.cos(ph), 1e-6))
-    ph_dot = (Vh * np.cos(psi)) / r
-    V_dot = -D - g * np.sin(gam) + mars.omega**2 * r * np.cos(ph) * \
-            (np.sin(gam)*np.cos(ph) - np.cos(gam)*np.sin(ph)*np.cos(psi))
-    gam_dot = (L*np.cos(sigma)/max(V,1e-6)) + (V/r - g/max(V,1e-6))*np.cos(gam) + \
-              2*mars.omega*np.cos(ph)*np.sin(psi) + \
-              (mars.omega**2*r/max(V,1e-6))*np.cos(ph)* \
-              (np.cos(gam)*np.cos(ph) + np.sin(gam)*np.sin(ph)*np.cos(psi))
-    psi_dot = (L*np.sin(sigma))/(max(V,1e-6)*max(np.cos(gam),1e-6)) + \
-              (Vh/r)*np.sin(psi)*np.tan(ph) - \
-              2*mars.omega*(np.tan(gam)*np.cos(ph)*np.cos(psi) - np.sin(ph)) + \
-              (mars.omega**2*r/(max(V,1e-6)*max(np.cos(gam),1e-6)))*np.sin(ph)*np.cos(ph)*np.sin(psi)
-    
-    return np.array([r_dot, th_dot, ph_dot, V_dot, gam_dot, psi_dot])
+
+    cos_lat = max(np.cos(lat), 1e-6)
+    V_safe = max(V, 1e-6)
+    cos_gam_safe = max(np.cos(gam), 1e-6)
+
+    r_dot  = V * np.sin(gam)
+    lon_dot = (Vh * np.sin(psi)) / (r * cos_lat)
+    lat_dot = (Vh * np.cos(psi)) / r
+
+    V_dot = -D - g * np.sin(gam) + mars.omega**2 * r * np.cos(lat) * \
+        (np.sin(gam)*np.cos(lat) - np.cos(gam)*np.sin(lat)*np.cos(psi))
+
+    gam_dot = (L*np.cos(sigma)/V_safe) + (V/r - g/V_safe)*np.cos(gam) + \
+              2*mars.omega*np.cos(lat)*np.sin(psi) + \
+              (mars.omega**2*r/V_safe)*np.cos(lat)* \
+              (np.cos(gam)*np.cos(lat) + np.sin(gam)*np.sin(lat)*np.cos(psi))
+
+    psi_dot = (L*np.sin(sigma))/(V_safe*cos_gam_safe) + \
+              (Vh/r)*np.sin(psi)*np.tan(lat) - \
+              2*mars.omega*(np.tan(gam)*np.cos(lat)*np.cos(psi) - np.sin(lat)) + \
+              (mars.omega**2*r/(V_safe*cos_gam_safe))*np.sin(lat)*np.cos(lat)*np.sin(psi)
+
+    return np.array([r_dot, lon_dot, lat_dot, V_dot, gam_dot, psi_dot])
 
 def rk4_step(f, state, sigma, dt):
-    """RK4 integration step."""
     k1 = f(state, sigma)
     k2 = f(state + 0.5*dt*k1, sigma)
     k3 = f(state + 0.5*dt*k2, sigma)
     k4 = f(state + dt*k3, sigma)
-    return state + (dt/6.0)*(k1 + 2*k2 + 2*k3 + k4)
+    return state + dt/6*(k1 + 2*k2 + 2*k3 + k4)
 
-def compute_loads(state):
-    """Compute aerodynamic loads."""
-    r, th, ph, V, gam, psi = state
+def aero_loads(state):
+    r, _, _, V, _, _ = state
     h = r - mars.radius
-    rho = mars.rho0 * np.exp(-h / mars.Hs)
-    
+    rho = mars.density(h)
     D = 0.5 * rho * V**2 / veh.beta
     L = veh.L_over_D * D
     q = 0.5 * rho * V**2
-    
-    g0 = 9.80665
-    A_total = np.sqrt(D**2 + L**2) / g0
-    
+    A = np.sqrt(D**2 + L**2) / 9.80665
     Qdot = veh.k_heat_flux * (rho**veh.N) * (V**veh.M)
-    
-    return h, rho, q, A_total, Qdot
+    return h, q, A, Qdot
 
-def deploy_trigger(h, V, q, mars=mars, region=deploy_region):
-    """Deployment trigger based on unified Mach/q/altitude envelope."""
+def deploy_trigger(h, V, q):
     a = mars.sound_speed(h)
-    a_safe = max(a, 1e-6)
-    mach = V / a_safe
-
-    in_box = (
-        (region.mach_min <= mach <= region.mach_max) and
-        (region.q_min    <= q    <= region.q_max) and
-        (h >= region.h_min)
+    mach = V / max(a, 1e-6)
+    return (
+        (deploy.mach_min <= mach <= deploy.mach_max) and
+        (deploy.q_min <= q <= deploy.q_max) and
+        (h >= deploy.h_min)
     )
 
-    # h <= 0 is still a hard stop in the integrator
-    return in_box or (h <= 6.0e3)
+def bank_profile_three_section(t, T, sigma1, sigma2):
+    """
+    Three-section bank profile in time-normalized coordinates:
+      0 ≤ τ < 0.35: σ = σ1
+      0.35 ≤ τ < 0.50: linear blend from σ1 → σ2
+      0.50 ≤ τ ≤ 1   : σ = σ2
+    """
+    if T <= 0:
+        return sigma1
+    tau = t / T
+    if tau < 0.35:
+        return sigma1
+    elif tau < 0.50:
+        alpha = (tau - 0.35) / (0.15 + 1e-9)  # 0 at τ=0.35, 1 at τ=0.50
+        return sigma1 * (1 - alpha) + sigma2 * alpha  # linear interpolation
+    else:
+        return sigma2
 
+# ============================================================
+# 4️⃣ TWO-PASS SIMULATION (CONSISTENT BANK TIMING)
+# ============================================================
 
-def simulate_entry_safe(initial_state, dt=0.25, tmax=2000.0,
-                        sigma1=np.deg2rad(75.0), sigma2=np.deg2rad(-75.0),
-                        constraints=constraints):
-    """Simulate entry with two-pass approach for correct bank profile timing."""
-    # First pass: estimate trajectory duration
-    state = initial_state.copy()
+def simulate_entry_two_pass(sigma1, sigma2, dt=0.25, tmax=4000.0):
+    """
+    Two-pass simulation to ensure bank profile is normalized to deploy time.
+
+    Pass 1:
+      - Use a provisional duration T_guess = tmax
+      - Integrate with bank_profile_three_section(t, T_guess, σ1, σ2)
+      - Find deploy time t_dep (when deploy_trigger is first met)
+      - If no deploy or path constraint violation → invalid
+
+    Pass 2:
+      - Reintegrate from state0 with bank_profile_three_section(t, t_dep, σ1, σ2),
+        so the same 3-section shape is normalized to actual deploy time
+      - Compute final state, deploy loads, and max loads
+
+    Returns dict or None if invalid:
+      {
+        lat, lon, h, V, gam, psi,
+        max_q, max_A, max_Qdot,
+        q_dep, A_dep, Qdot_dep, mach_dep,
+        sigma1, sigma2, t_dep
+      }
+    """
+    # ----- Pass 1: estimate deploy time -----
     t = 0.0
-    
+    state = state0.copy()
+
+    max_q = max_A = max_Qdot = 0.0
+    t_dep = None
+
     while t < tmax:
         sigma = bank_profile_three_section(t, tmax, sigma1, sigma2)
         state = rk4_step(eom_numpy, state, sigma, dt)
-        h, rho, q, A_total, Qdot = compute_loads(state)
-        r, th, ph, V, gam, psi = state
-        
-        if deploy_trigger(h, V, q):
-            break
-        t += dt
-    
-    t_actual = t
-    
-    # Second pass: re-simulate with normalized bank profile
-    state = initial_state.copy()
-    t = 0.0
-    
-    max_q = 0.0
-    max_A = 0.0
-    max_Qdot = 0.0
-    violated = False
-    
-    while t < tmax:
-        sigma = bank_profile_three_section(t, t_actual, sigma1, sigma2)
-        state = rk4_step(eom_numpy, state, sigma, dt)
-        
-        h, rho, q, A_total, Qdot = compute_loads(state)
-        r, th, ph, V, gam, psi = state
-        
+        h, q, A, Qdot = aero_loads(state)
         max_q = max(max_q, q)
-        max_A = max(max_A, A_total)
+        max_A = max(max_A, A)
         max_Qdot = max(max_Qdot, Qdot)
-        
-        if (q > constraints.q_max or
-            A_total > constraints.A_max or
-            Qdot > constraints.Qdot_max):
-            violated = True
-        
-        if deploy_trigger(h, V, q):
+
+        if q > cons.q_max or A > cons.A_max or Qdot > cons.Qdot_max:
+            return None
+
+        if deploy_trigger(h, state[3], q) or h <= 0:
+            t_dep = t
             break
-        
+
         t += dt
-    
-    return state, t, violated, max_q, max_A, max_Qdot
 
-def build_reachable_set(lat0, lon0, sigma1_grid, sigma2_grid,
-                        dt=0.25, tmax=4000.0):
-    """Build reachable set by sweeping control parameters."""
-    print("\n" + "="*80)
-    print("BUILDING REACHABLE SET")
-    print("="*80)
-    print(f"Control grid: {len(sigma1_grid)} × {len(sigma2_grid)} = {len(sigma1_grid)*len(sigma2_grid)} samples")
-    
-    h0 = 125e3
-    r0 = mars.radius + h0
-    V0 = V0_reachable
-    gam0 = np.deg2rad(-12.0)
-    psi0 = np.deg2rad(-2.8758)
-    state0 = np.array([r0, lon0, lat0, V0, gam0, psi0])
-    
-    all_samples = []
-    
-    for i, s1 in enumerate(sigma1_grid):
-        for j, s2 in enumerate(sigma2_grid):
-            state_f, t_f, violated, max_q, max_A, max_Qdot = simulate_entry_safe(
-                state0, dt=dt, tmax=tmax, sigma1=s1, sigma2=s2, constraints=constraints
-            )
-            
-            r_f, lon_f, lat_f, V_f, gam_f, psi_f = state_f
-            h_f = r_f - mars.radius
-            
-            all_samples.append([
-                lat_f, lon_f, h_f/1e3,  # lat, lon, altitude [km]
-                max_q, max_A, max_Qdot,  # max loads
-                np.rad2deg(s1), np.rad2deg(s2),  # control parameters [deg]
-                t_f  # trajectory duration [s]
-            ])
-            #print(f"Sample ({i+1},{j+1}): h_final={h_f/1e3:7.2f} km, max_q={max_q:8.1f} Pa, max_A={max_A:5.2f} g, max_Qdot={max_Qdot:8.1f} W/m^2, violated={violated}")
-    
-    all_samples = np.array(all_samples)
-    print(f"Generated {len(all_samples)} samples")
-    
-    return all_samples
+    if t_dep is None:
+        return None  # never deployed
 
-def find_best_target(all_samples, lat0, lon0):
-    """Find best target using cost function."""
-    print("\n" + "="*80)
-    print("TARGET SELECTION")
-    print("="*80)
-    
-    # Extract data
-    lat_all = all_samples[:, 0]
-    lon_all = all_samples[:, 1]
-    ALT_all = all_samples[:, 2]
-    q_all = all_samples[:, 3]
-    A_all = all_samples[:, 4]
-    Qdot_all = all_samples[:, 5]
-    sigma1_all = all_samples[:, 6]
-    sigma2_all = all_samples[:, 7]
-    t_all = all_samples[:, 8]
-    
-    # Compute downrange/crossrange
+    # ----- Pass 2: re-simulate with normalized profile -----
+    T = max(t_dep, dt)
+    t = 0.0
+    state = state0.copy()
+    max_q = max_A = max_Qdot = 0.0  # recompute with normalized timing
+
+    while t < tmax:
+        sigma = bank_profile_three_section(t, T, sigma1, sigma2)
+        state = rk4_step(eom_numpy, state, sigma, dt)
+        h, q, A, Qdot = aero_loads(state)
+
+        max_q = max(max_q, q)
+        max_A = max(max_A, A)
+        max_Qdot = max(max_Qdot, Qdot)
+
+        if q > cons.q_max or A > cons.A_max or Qdot > cons.Qdot_max:
+            return None
+
+        if deploy_trigger(h, state[3], q) or h <= 0:
+            break
+
+        t += dt
+
+    # Final state at deploy
+    r, lon, lat, V, gam, psi = state
+    h_final, q_final, A_final, Qdot_final = aero_loads(state)
+    a_final = mars.sound_speed(h_final)
+    mach_final = V / max(a_final, 1e-6)
+
+    return dict(
+        lat   = lat,
+        lon   = lon,
+        h     = r - mars.radius,
+        V     = V,
+        gam   = gam,
+        psi   = psi,
+        max_q   = max_q,
+        max_A   = max_A,
+        max_Qdot = max_Qdot,
+        q_dep    = q_final,
+        A_dep    = A_final,
+        Qdot_dep = Qdot_final,
+        mach_dep = mach_final,
+        sigma1 = np.rad2deg(sigma1),
+        sigma2 = np.rad2deg(sigma2),
+        t_dep  = t
+    )
+
+# ============================================================
+# 5️⃣ REACHABLE SET & TARGET SELECTION
+# ============================================================
+
+def build_reachable_set(n_grid=10, dt=0.25, tmax=4000.0):
+    sigma_grid = np.deg2rad(np.linspace(-81, 81, n_grid))
+    samples = []
+    for s1 in sigma_grid:
+        for s2 in sigma_grid:
+            res = simulate_entry_two_pass(s1, s2, dt=dt, tmax=tmax)
+            if res is not None:
+                samples.append(res)
+    return samples
+
+def select_best_target(samples, max_crossrange_km=5.0):
+    """
+    Filter samples:
+      - path constraints already enforced
+      - optional |crossrange| < max_crossrange_km
+    Then pick the one with maximum deploy altitude.
+    """
+    if not samples:
+        return None
+
+    # Use a reference target slightly ahead of entry point for proper coordinate frame
+    lat_ref = lat0 + np.deg2rad(1.0)  # 1 degree ahead in latitude
+    lon_ref = lon0  # Same longitude
+
+    filtered = []
+    for s in samples:
+        lat_f = s['lat']
+        lon_f = s['lon']
+        # Use spherical_metrics to compute true crossrange
+        _, _, _, RC, RD, RD_go, Rgo = spherical_metrics(
+            lat0, lon0, lat_f, lon_f, lat_ref, lon_ref, mars.radius
+        )
+        if abs(RC/1e3) <= max_crossrange_km:
+            filtered.append(s)
+
+    if not filtered:
+        filtered = samples  # if nothing passes crossrange, fallback
+
+    best = max(filtered, key=lambda s: s['h'])
+
+    # Add crossrange & downrange using spherical_metrics BEFORE printing
+    lat_f = best['lat']
+    lon_f = best['lon']
     lat_ref = lat0 + np.deg2rad(1.0)
     lon_ref = lon0
-    
-    RD_all = np.zeros(len(lat_all))
-    RC_all = np.zeros(len(lat_all))
-    
-    for i in range(len(lat_all)):
-        _, _, _, RC_all[i], RD_all[i], _, _ = spherical_metrics(
-            lat0, lon0, lat_all[i], lon_all[i],
-            lat_ref, lon_ref, mars.radius
-        )
-    
-    RD_all /= 1e3
-    RC_all /= 1e3
-    
-    # Apply constraints
-    valid_mask = (
-        (np.abs(RC_all) < 10.0) &
-        (A_all < constraints.A_max) &
-        (q_all <= constraints.q_max) &
-        (Qdot_all <= constraints.Qdot_max)
+    _, _, _, RC, RD, RD_go, Rgo = spherical_metrics(
+        lat0, lon0, lat_f, lon_f, lat_ref, lon_ref, mars.radius
     )
-    
-    n_valid = np.sum(valid_mask)
-    print(f"Valid targets: {n_valid} / {len(lat_all)}")
-    
-    if n_valid == 0:
-        print("ERROR: No valid targets found!")
-        return None
-    
-    # Extract valid samples
-    lat_valid = lat_all[valid_mask]
-    lon_valid = lon_all[valid_mask]
-    ALT_valid = ALT_all[valid_mask]
-    RC_valid = RC_all[valid_mask]
-    RD_valid = RD_all[valid_mask]
-    q_valid = q_all[valid_mask]
-    A_valid = A_all[valid_mask]
-    Qdot_valid = Qdot_all[valid_mask]
-    sigma1_valid = sigma1_all[valid_mask]
-    sigma2_valid = sigma2_all[valid_mask]
-    t_valid = t_all[valid_mask]
-    
-    # Cost function: maximize altitude
-    cost = -ALT_valid
-    best_idx = np.argmin(cost)
-    
-    best_target = {
-        'lat': lat_valid[best_idx],
-        'lon': lon_valid[best_idx],
-        'altitude': ALT_valid[best_idx],
-        'downrange': RD_valid[best_idx],
-        'crossrange': RC_valid[best_idx],
-        'max_q': q_valid[best_idx],
-        'max_A': A_valid[best_idx],
-        'max_Qdot': Qdot_valid[best_idx],
-        'sigma1': sigma1_valid[best_idx],
-        'sigma2': sigma2_valid[best_idx],
-        't_final': t_valid[best_idx]
-    }
-    
-    print(f"\nBest target selected:")
-    print(f"  Latitude:     {np.rad2deg(best_target['lat']):7.3f}°")
-    print(f"  Longitude:    {np.rad2deg(best_target['lon']):7.3f}°")
-    print(f"  Downrange:    {best_target['downrange']:7.2f} km")
-    print(f"  Crossrange:   {best_target['crossrange']:7.2f} km")
-    print(f"  Altitude:     {best_target['altitude']:7.2f} km")
-    print(f"  Max q:        {best_target['max_q']:8.1f} Pa")
-    print(f"  Max A:        {best_target['max_A']:5.2f} g")
-    print(f"  Max Qdot:     {best_target['max_Qdot']:8.1f} W/m²")
-    print(f"  Control: σ1={best_target['sigma1']:6.2f}°, σ2={best_target['sigma2']:6.2f}°")
-    print(f"  Time:         {best_target['t_final']:.1f} s")
-    
-    return best_target, all_samples, RD_all, RC_all
+    best['crossrange_km'] = RC / 1e3
+    best['downrange_km'] = RD / 1e3
+
+    print("\nBest target (reachable set):")
+    print(f"  h_dep      = {best['h']/1e3:7.2f} km")
+    print(f"  lat        = {np.rad2deg(best['lat']):7.3f} deg")
+    print(f"  lon        = {np.rad2deg(best['lon']):7.3f} deg")
+    print(f"  crossrange = {best['crossrange_km']:7.2f} km")
+    print(f"  downrange  = {best['downrange_km']:7.2f} km")
+    print(f"  σ1, σ2     = {best['sigma1']:6.1f}, {best['sigma2']:6.1f} deg")
+    print(f"  t_dep      = {best['t_dep']:7.2f} s")
+    print(f"  max q      = {best['max_q']:8.1f} Pa")
+    print(f"  max A      = {best['max_A']:5.2f} g")
+    print(f"  max Q̇      = {best['max_Qdot']:8.1f} W/m²")
+    print(f"  q_dep      = {best['q_dep']:8.1f} Pa")
+    print(f"  Mach_dep   = {best['mach_dep']:7.3f}")
+
+    return best
 
 # ============================================================
-# COLLOCATION OPTIMIZATION (from Collocation_Method.py)
+# 6️⃣ DYNAMICS (CasADi) FOR COLLOCATION
 # ============================================================
 
-def eom_casadi(state, sigma):
-    """CasADi symbolic version of equations of motion."""
-    r, lon, lat, V, gam, psi = state[0], state[1], state[2], state[3], state[4], state[5]
-    
-    g = mars.mu / r**2
+def eom_ca(x, sigma):
+    """CasADi version of EOM, consistent with eom_numpy."""
+    r   = x[0]
+    lon = x[1]
+    lat = x[2]
+    V   = x[3]
+    gam = x[4]
+    psi = x[5]
+
+    g = mars.mu / (r**2)
     h = r - mars.radius
     rho = mars.rho0 * ca.exp(-h / mars.Hs)
+
     D = 0.5 * rho * V**2 / veh.beta
     L = veh.L_over_D * D
     Vh = V * ca.cos(gam)
-    
-    r_dot = V * ca.sin(gam)
-    lon_dot = (Vh * ca.sin(psi)) / (r * ca.fmax(ca.cos(lat), 1e-6))
-    lat_dot = (Vh * ca.cos(psi)) / r
-    V_dot = -D - g * ca.sin(gam) + mars.omega**2 * r * ca.cos(lat) * \
-            (ca.sin(gam)*ca.cos(lat) - ca.cos(gam)*ca.sin(lat)*ca.cos(psi))
-    gam_dot = (L*ca.cos(sigma)/ca.fmax(V,1e-6)) + (V/r - g/ca.fmax(V,1e-6))*ca.cos(gam) + \
-              2*mars.omega*ca.cos(lat)*ca.sin(psi) + \
-              (mars.omega**2*r/ca.fmax(V,1e-6))*ca.cos(lat)* \
-              (ca.cos(gam)*ca.cos(lat) + ca.sin(gam)*ca.sin(lat)*ca.cos(psi))
-    psi_dot = (L*ca.sin(sigma))/(ca.fmax(V,1e-6)*ca.fmax(ca.cos(gam),1e-6)) + \
-              (Vh/r)*ca.sin(psi)*ca.tan(lat) - \
-              2*mars.omega*(ca.tan(gam)*ca.cos(lat)*ca.cos(psi) - ca.sin(lat)) + \
-              (mars.omega**2*r/(ca.fmax(V,1e-6)*ca.fmax(ca.cos(gam),1e-6)))*ca.sin(lat)*ca.cos(lat)*ca.sin(psi)
-    
-    return ca.vertcat(r_dot, lon_dot, lat_dot, V_dot, gam_dot, psi_dot)
 
-def solve_collocation_with_target(best_target):
-    """Solve collocation optimization with target from reachable set."""
-    
-    print("\n" + "="*80)
-    print("DIRECT COLLOCATION OPTIMIZATION")
-    print("="*80)
-    
-    N_SEGMENTS = 200
-    lat_target = best_target['lat']
-    lon_target = best_target['lon']
-    
-    state0 = np.array([r0, lon0, lat0, V0_collocation, gam0, psi0])
-    
-    print(f"Target: lat={np.rad2deg(lat_target):.3f}°, lon={np.rad2deg(lon_target):.3f}°")
-    print(f"Control initialization: σ1={best_target['sigma1']:.1f}°, σ2={best_target['sigma2']:.1f}°")
-    
-    # Create optimization problem
+    cos_lat = ca.fmax(ca.cos(lat), 1e-6)
+    V_safe = ca.fmax(V, 1e-6)
+    cos_gam_safe = ca.fmax(ca.cos(gam), 1e-6)
+
+    rdot = V * ca.sin(gam)
+    londot = (Vh*ca.sin(psi)) / (r * cos_lat)
+    latdot = (Vh*ca.cos(psi)) / r
+
+    Vdot = -D - g*ca.sin(gam) + mars.omega**2 * r * ca.cos(lat) * \
+        (ca.sin(gam)*ca.cos(lat) - ca.cos(gam)*ca.sin(lat)*ca.cos(psi))
+
+    gamdot = (L*ca.cos(sigma)/V_safe) + (V/r - g/V_safe)*ca.cos(gam) + \
+             2*mars.omega*ca.cos(lat)*ca.sin(psi) + \
+             (mars.omega**2*r/V_safe)*ca.cos(lat)* \
+             (ca.cos(gam)*ca.cos(lat) + ca.sin(gam)*ca.sin(lat)*ca.cos(psi))
+
+    psidot = (L*ca.sin(sigma))/(V_safe*cos_gam_safe) + \
+             (Vh/r)*ca.sin(psi)*ca.tan(lat) - \
+             2*mars.omega*(ca.tan(gam)*ca.cos(lat)*ca.cos(psi) - ca.sin(lat)) + \
+             (mars.omega**2*r/(V_safe*cos_gam_safe))*ca.sin(lat)*ca.cos(lat)*ca.sin(psi)
+
+    return ca.vertcat(rdot, londot, latdot, Vdot, gamdot, psidot)
+
+# ============================================================
+# 7️⃣ COLLOCATION OPTIMIZATION
+# ============================================================
+
+def optimize_to_target(best, N=180):
+    """
+    Direct collocation with trapezoidal integration.
+    Terminal constraints:
+      - position within tolerance of best target
+      - final state in deploy envelope
+    Path constraints on q, A, Qdot.
+    Control constraints on σ, σ̇, σ̈.
+    """
     opti = ca.Opti()
-    
-    X = opti.variable(6, N_SEGMENTS + 1)
-    U = opti.variable(1, N_SEGMENTS)
-    dt = opti.variable()
-    
-    r = X[0, :]
-    lon = X[1, :]
-    lat = X[2, :]
-    V = X[3, :]
-    gam = X[4, :]
-    psi = X[5, :]
-    sigma = U[0, :]
-    
-    # Objective: maximize altitude while minimizing gamma^2
-    # Objective weights (rescaled)
-    W_ALTITUDE = 1e-3     # h in meters → scale down
-    W_GAMMA    = 1.0
-    W_DEPLOY   = 10.0     # how strongly we prefer the middle of the deploy box
 
-    h_final = r[-1] - mars.radius
-    gam_final = gam[-1]
-    V_f = V[-1]
+    X = opti.variable(6, N+1)   # states
+    U = opti.variable(1, N)     # bank angle
+    dt = opti.variable()        # time step
 
-    # Terminal Mach/q again
-    rho_f = mars.rho0 * ca.exp(-h_final / mars.Hs)
-    q_f   = 0.5 * rho_f * V_f**2
+    # Initial condition
+    opti.subject_to(X[:,0] == state0)
 
-    h_km_f = h_final / 1e3
-    T_f = 1.4e-13 * h_km_f**3 - 8.85e-9 * h_km_f**2 - 1.245e-3 * h_km_f + 205.36
-    a_sound_f = ca.sqrt(mars.gamma_gas * mars.R_gas * ca.fmax(T_f, 1.0))
-    mach_f = V_f / ca.fmax(a_sound_f, 1e-6)
-    MACH_MIN = deploy_region.mach_min
-    MACH_MAX = deploy_region.mach_max
-    Q_MIN    = deploy_region.q_min
-    Q_MAX    = deploy_region.q_max
-    H_MIN    = deploy_region.h_min
+    # Dynamics constraints (trapezoidal)
+    for k in range(N):
+        xk  = X[:,k]
+        xk1 = X[:,k+1]
+        uk  = U[:,k]
 
-    # Center of deploy box (Mach and q)
-    mach_c = 0.5 * (MACH_MIN + MACH_MAX)
-    q_c    = 0.5 * (Q_MIN    + Q_MAX)
+        f1 = eom_ca(xk,  uk)
+        f2 = eom_ca(xk1, uk)
+        opti.subject_to(xk1 == xk + 0.5*dt*(f1 + f2))
 
-    # Normalized offsets from center
-    mach_norm = (mach_f - mach_c) / (0.5 * (MACH_MAX - MACH_MIN) + 1e-6)
-    q_norm    = (q_f    - q_c   ) / (0.5 * (Q_MAX    - Q_MIN   ) + 1e-6)
+    # Terminal quantities
+    r_f = X[0,-1]
+    lon_f = X[1,-1]
+    lat_f = X[2,-1]
+    V_f = X[3,-1]
+    gam_f = X[4,-1]
 
-    objective = 0
-    # maximize altitude
-    objective += -W_ALTITUDE * h_final
-    # penalize very steep final gamma (optional; you can turn this off if you want)
-    objective += W_GAMMA * gam_final**2
-    # keep deployment near the middle of the Mach / q box
-    objective += W_DEPLOY * (mach_norm**2 + q_norm**2)
-
-    opti.minimize(objective)
-    
-    # Boundary conditions
-    opti.subject_to(X[:, 0] == state0)
-    
-    # Terminal position constraint: hit the target
-    lat_f = lat[-1]
-    lon_f = lon[-1]
-    dlat = lat_f - lat_target
-    dlon = lon_f - lon_target
-    a = ca.sin(dlat/2)**2 + ca.cos(lat_f) * ca.cos(lat_target) * ca.sin(dlon/2)**2
-    c = 2 * ca.atan2(ca.sqrt(a), ca.sqrt(1-a))
-    miss_distance = mars.radius * c
-    
-    # Hard constraint: miss distance must be less than 10 km
-    opti.subject_to(miss_distance <= 5000.0)
-    
-    # Dynamics constraints (Hermite-Simpson)
-    for k in range(N_SEGMENTS):
-        X_k = X[:, k]
-        X_kp1 = X[:, k+1]
-        U_k = U[:, k]
-        
-        X_mid = 0.5 * (X_k + X_kp1) + (dt/8.0) * (eom_casadi(X_k, U_k) - eom_casadi(X_kp1, U_k))
-        
-        f_k = eom_casadi(X_k, U_k)
-        f_mid = eom_casadi(X_mid, U_k)
-        f_kp1 = eom_casadi(X_kp1, U_k)
-        
-        opti.subject_to(X_kp1 == X_k + (dt/6.0) * (f_k + 4*f_mid + f_kp1))
-    
-    # Control bounds
-    opti.subject_to(opti.bounded(SIGMA_MIN, sigma, SIGMA_MAX))
-    
-    # State bounds
-    opti.subject_to(r >= mars.radius)
-    opti.subject_to(V >= 10.0)
-    opti.subject_to(opti.bounded(deg(-89), gam, deg(89)))
-    
-    # Control rate constraints
-    for k in range(N_SEGMENTS - 1):
-        sigma_dot = (sigma[k+1] - sigma[k]) / dt
-        opti.subject_to(opti.bounded(SIGMA_DOT_MIN, sigma_dot, SIGMA_DOT_MAX))
-    
-    # Control acceleration constraints
-    for k in range(N_SEGMENTS - 2):
-        sigma_dot_k = (sigma[k+1] - sigma[k]) / dt
-        sigma_dot_kp1 = (sigma[k+2] - sigma[k+1]) / dt
-        sigma_ddot = (sigma_dot_kp1 - sigma_dot_k) / dt
-        opti.subject_to(opti.bounded(SIGMA_DOT_DOT_MIN, sigma_ddot, SIGMA_DOT_DOT_MAX))
-    
-    # Time step bounds
-    opti.subject_to(opti.bounded(0.1, dt, 5.0))
-    
-    # Terminal constraints (deployment envelope)
-    # Terminal constraints (deployment envelope)
-    # Terminal constraints (deployment envelope) – unified with deploy_region
-    MACH_MIN = deploy_region.mach_min
-    MACH_MAX = deploy_region.mach_max
-    Q_MIN    = deploy_region.q_min
-    Q_MAX    = deploy_region.q_max
-    H_MIN    = deploy_region.h_min
-
-    
-    r_f = r[-1]
-    V_f = V[-1]
     h_f = r_f - mars.radius
-    
     rho_f = mars.rho0 * ca.exp(-h_f / mars.Hs)
     q_f = 0.5 * rho_f * V_f**2
-    
+
     h_km_f = h_f / 1e3
-    T_f = 1.4e-13 * h_km_f**3 - 8.85e-9 * h_km_f**2 - 1.245e-3 * h_km_f + 205.36
-    a_sound_f = ca.sqrt(mars.gamma_gas * mars.R_gas * ca.fmax(T_f, 1.0))
-    mach_f = V_f / ca.fmax(a_sound_f, 1e-6)
-    
-    opti.subject_to(opti.bounded(MACH_MIN, mach_f, MACH_MAX))
-    opti.subject_to(opti.bounded(Q_MIN, q_f, Q_MAX))
-    opti.subject_to(h_f >= H_MIN)
-    
-    # Initial guess from reachable set
-    print("Generating initial guess from reachable set parameters...")
-    
-    sigma1_rad = np.deg2rad(best_target['sigma1'])
-    sigma2_rad = np.deg2rad(best_target['sigma2'])
-    
-    # Use trajectory duration from reachable set (no need to re-estimate)
-    t_actual = best_target['t_final']
-    print(f"Using trajectory duration from reachable set: {t_actual:.1f} s")
-    
-    # Generate initial guess with properly normalized bank profile
-    state_sim = state0.copy()
-    X_guess = np.zeros((6, N_SEGMENTS + 1))
-    X_guess[:, 0] = state0
-    
-    def eval_terminal_from_guess(X_guess):
-        r_f = X_guess[0, -1]
-        lon_f = X_guess[1, -1]
-        lat_f = X_guess[2, -1]
-        V_f = X_guess[3, -1]
-        gam_f = X_guess[4, -1]
-        psi_f = X_guess[5, -1]
+    T_f = 1.4e-13*h_km_f**3 - 8.85e-9*h_km_f**2 - 1.245e-3*h_km_f + 205.36
+    T_f = ca.fmax(T_f, 1.0)
+    a_f = ca.sqrt(mars.gamma_gas * mars.R_gas * T_f)
+    mach_f = V_f / a_f
 
-        h_f = r_f - mars.radius
-        rho_f = mars.rho0 * np.exp(-h_f / mars.Hs)
-        q_f = 0.5 * rho_f * V_f**2
+    # Deploy constraints at final point
+    opti.subject_to(mach_f >= deploy.mach_min)
+    opti.subject_to(mach_f <= deploy.mach_max)
+    opti.subject_to(q_f    >= deploy.q_min)
+    opti.subject_to(q_f    <= deploy.q_max)
+    opti.subject_to(h_f    >= deploy.h_min)
 
-        h_km_f = h_f / 1e3
-        T_f = 1.4e-13 * h_km_f**3 - 8.85e-9 * h_km_f**2 - 1.245e-3 * h_km_f + 205.36
-        a_f = np.sqrt(mars.gamma_gas * mars.R_gas * max(T_f, 1.0))
-        mach_f = V_f / max(a_f, 1e-6)
+    # Terminal position miss (inequality)
+    lat_tgt = best['lat']
+    lon_tgt = best['lon']
+    dlat = lat_f - lat_tgt
+    dlon = lon_f - lon_tgt
+    miss = mars.radius * ca.sqrt(dlat**2 + dlon**2)
+    opti.subject_to(miss <= 1000.0)  # 1 km tolerance
 
-        # miss distance using same formula as in the Opti problem
-        dlat = lat_f - best_target['lat']
-        dlon = lon_f - best_target['lon']
-        a = np.sin(dlat/2)**2 + np.cos(lat_f)*np.cos(best_target['lat'])*np.sin(dlon/2)**2
-        c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
-        miss_distance = mars.radius * c   # [m]
-        print("---- INITIAL GUESS TERMINAL STATE ----")
-        print(f"h_f        = {h_f/1e3:.2f} km (limit >= {deploy_region.h_min/1e3:.2f} km)")
-        print(f"Mach_f     = {mach_f:.3f} (limits [{deploy_region.mach_min}, {deploy_region.mach_max}])")
-        print(f"q_f        = {q_f:.1f} Pa (limits [{deploy_region.q_min}, {deploy_region.q_max}])")
-        print(f"miss_dist  = {miss_distance/1e3:.2f} km (limit <= 5.00 km)")
-        print(f"gamma_f    = {np.rad2deg(gam_f):.2f} deg")
-    
-    # Use actual trajectory duration to determine dt
-    dt_guess = (t_actual+0.25) / N_SEGMENTS
-    print(f"Initial dt guess: {dt_guess:.3f} s/segment (total time: {t_actual:.1f} s)")
-    
-    # Now the bank profile is properly timed
-    deployed = False
-    for k in range(N_SEGMENTS):
-        t_k = k * dt_guess
-        sigma_k = bank_profile_three_section(t_k, t_actual, sigma1_rad, sigma2_rad)
-        print(f"Segment {k+1}/{N_SEGMENTS}, t={t_k:.1f}s, sigma={np.rad2deg(sigma_k):.2f} deg")
-        state_sim = rk4_step(eom_numpy, state_sim, sigma_k, dt_guess)
-        X_guess[:, k+1] = state_sim
-        
-        # Check deployment trigger
-        h_sim, _, q_sim, _, _ = compute_loads(state_sim)
-        V_sim = state_sim[3]
-        if deploy_trigger(h_sim, V_sim, q_sim):
-            deployed = True
-            # Fill remaining segments with final state
-            for j in range(k+2, N_SEGMENTS+1):
-                X_guess[:, j] = state_sim
-            print(f"Deployment conditions met at segment {k+1}/{N_SEGMENTS} (t={t_k:.1f}s)")
-            break
-    
-    if not deployed:
-        print(f"WARNING: Deployment conditions not met within {N_SEGMENTS} segments")
-    
-    print(f"Initial guess: h_final = {(X_guess[0,-1] - mars.radius)/1e3:.1f} km")
-    print(f"Initial guess: gamma_final = {np.rad2deg(X_guess[4,-1]):.1f} deg")
-    
-    opti.set_initial(X, X_guess)
-    eval_terminal_from_guess(X_guess)
-    
-    # Control initial guess with properly normalized bank profile
-    U_guess = np.zeros((1, N_SEGMENTS))
-    for k in range(N_SEGMENTS):
-        t_k = k * dt_guess
-        U_guess[0, k] = bank_profile_three_section(t_k, t_actual, sigma1_rad, sigma2_rad)
-    
+    # Path constraints at all nodes
+    for k in range(N+1):
+        xk = X[:,k]
+        r_k = xk[0]
+        V_k = xk[3]
+        h_k = r_k - mars.radius
+        rho_k = mars.rho0 * ca.exp(-h_k / mars.Hs)
+        q_k = 0.5 * rho_k * V_k**2
+        D_k = 0.5 * rho_k * V_k**2 / veh.beta
+        L_k = veh.L_over_D * D_k
+        A_k = ca.sqrt(D_k**2 + L_k**2) / 9.80665
+        Qdot_k = veh.k_heat_flux * (rho_k**veh.N) * (V_k**veh.M)
+
+        opti.subject_to(q_k    <= cons.q_max)
+        opti.subject_to(A_k    <= cons.A_max)
+        opti.subject_to(Qdot_k <= cons.Qdot_max)
+
+    # Control bounds
+    sigma_max_rad = np.deg2rad(cons.sigma_max)
+    opti.subject_to(U >= -sigma_max_rad)
+    opti.subject_to(U <=  sigma_max_rad)
+
+    # Control rate & acceleration bounds
+    sigma_dot_max = np.deg2rad(cons.sigma_dot_max)
+    sigma_ddot_max = np.deg2rad(cons.sigma_ddot_max)
+
+    for k in range(N-1):
+        sigma_dot = (U[0,k+1] - U[0,k]) / dt
+        opti.subject_to(sigma_dot >= -sigma_dot_max)
+        opti.subject_to(sigma_dot <=  sigma_dot_max)
+
+    for k in range(N-2):
+        sigma_dot_k  = (U[0,k+1] - U[0,k]) / dt
+        sigma_dot_k1 = (U[0,k+2] - U[0,k+1]) / dt
+        sigma_ddot = (sigma_dot_k1 - sigma_dot_k) / dt
+        opti.subject_to(sigma_ddot >= -sigma_ddot_max)
+        opti.subject_to(sigma_ddot <=  sigma_ddot_max)
+
+    # Time step bounds around reachable-set total time
+    T_guess = best['t_dep']
+    dt_guess = T_guess / N
+    opti.subject_to(dt >= 0.5 * dt_guess)
+    opti.subject_to(dt <= 1.5 * dt_guess)
+
+    # Objective: maximize h_f, shape γ, center Mach/q in deploy box
+    W_ALT   = 1.0
+    W_GAM   = 1.0e3
+    # W_DEP   = 10.0
+
+    # mach_c = 0.5*(deploy.mach_min + deploy.mach_max)
+    # q_c    = 0.5*(deploy.q_min   + deploy.q_max)
+    # mach_norm = (mach_f - mach_c) / (0.5*(deploy.mach_max - deploy.mach_min) + 1e-6)
+    # q_norm    = (q_f    - q_c   ) / (0.5*(deploy.q_max    - deploy.q_min   ) + 1e-6)
+
+    objective = 0
+    objective += -W_ALT * h_f
+    objective +=  W_GAM * gam_f**2
+    # objective +=  W_DEP * (mach_norm**2 + q_norm**2)
+
+    opti.minimize(objective)
+
+    # Initial guesses from reachable-set bank profile
+    sigma1_rad = np.deg2rad(best['sigma1'])
+    sigma2_rad = np.deg2rad(best['sigma2'])
+    U_guess = np.zeros((1, N))
+    X_guess = np.zeros((6, N+1))
+    X_guess[:,0] = state0
+    dt0 = dt_guess
+
+    for k in range(N):
+        t_k = k * dt0
+        sigma_k = bank_profile_three_section(t_k, T_guess, sigma1_rad, sigma2_rad)
+        U_guess[0,k] = sigma_k
+        X_guess[:,k+1] = rk4_step(eom_numpy, X_guess[:,k], sigma_k, dt0)
+
     opti.set_initial(U, U_guess)
-    # After computing dt_guess:
+    opti.set_initial(X, X_guess)
     opti.set_initial(dt, dt_guess)
 
-    # Replace your old dt bounds with tighter ones:
-    opti.subject_to(opti.bounded(0.5 * dt_guess, dt, 1.5 * dt_guess))
-
-    # Solver options
+    # Solver settings
     opts = {
-        'ipopt.print_level': 5,
-        'ipopt.max_iter': 3000,
-        'ipopt.tol': 1e-6,
-        'ipopt.acceptable_tol': 1e-4,
+        'ipopt.print_level': 3,
+        'ipopt.max_iter': 800,
+        'ipopt.tol': 1e-5,
+        'ipopt.acceptable_tol': 1e-3,
         'ipopt.mu_strategy': 'adaptive',
         'ipopt.nlp_scaling_method': 'gradient-based',
         'print_time': True
     }
-    
     opti.solver('ipopt', opts)
-    
-    print("\nStarting IPOPT solver...\n")
-    start_time = time.perf_counter()
-    
+
+    print("\nStarting optimization with IPOPT...")
     try:
         sol = opti.solve()
         success = True
-        print("\n" + "="*70)
-        print("OPTIMIZATION SUCCESSFUL")
-        print("="*70)
-    except RuntimeError as e:
-        print("\n" + "="*70)
-        print("OPTIMIZATION FAILED")
-        print("="*70)
-        print(f"Error: {e}")
+    except Exception as e:
+        print("Optimization failed:", e)
         sol = opti.debug
         success = False
-    
-    elapsed = time.perf_counter() - start_time
-    
-    # Extract solution
+
     X_sol = sol.value(X)
-    U_sol = sol.value(U)
-    dt_sol = sol.value(dt)
-    t_sol = np.arange(N_SEGMENTS + 1) * dt_sol
+    U_val = sol.value(U)
+    U_sol = np.array(U_val).flatten()
+    dt_sol = float(sol.value(dt))
+
+    return X_sol, U_sol, dt_sol, success
+
+# ============================================================
+# 8️⃣ PLOTTING UTILITIES
+# ============================================================
+
+def plot_reachable_set(samples, best):
+    lat = np.rad2deg([s['lat'] for s in samples])
+    lon = np.rad2deg([s['lon'] for s in samples])
+    alt = np.array([s['h']/1e3 for s in samples])
+    q   = np.array([s['max_q'] for s in samples])
+    A   = np.array([s['max_A'] for s in samples])
+    Q   = np.array([s['max_Qdot'] for s in samples])
+
+    # Compute downrange and crossrange for each sample using spherical_metrics
+    lat_ref = lat0 + np.deg2rad(1.0)  # 1 degree ahead in latitude
+    lon_ref = lon0  # Same longitude
     
-    if U_sol.ndim == 2:
-        U_sol_flat = U_sol[0, :]
-    else:
-        U_sol_flat = U_sol
+    RD_all = []
+    RC_all = []
+    for s in samples:
+        lat_f = s['lat']
+        lon_f = s['lon']
+        _, _, _, RC, RD, RD_go, Rgo = spherical_metrics(
+            lat0, lon0, lat_f, lon_f, lat_ref, lon_ref, mars.radius
+        )
+        RD_all.append(RD / 1e3)  # Convert to km
+        RC_all.append(RC / 1e3)  # Convert to km
     
-    # Build history
-    hist = {
-        "t": t_sol,
-        "h": (X_sol[0, :] - mars.radius) / 1e3,
-        "V": X_sol[3, :],
-        "gam": X_sol[4, :],
-        "psi": X_sol[5, :],
-        "lat": X_sol[2, :],
-        "lon": X_sol[1, :],
-        "sigma": np.append(U_sol_flat, U_sol_flat[-1]),
-    }
-    
-    # Compute derived quantities
-    hist["rho"] = []
-    hist["q"] = []
-    hist["mach"] = []
-    hist["A"] = []
-    hist["Qdot"] = []
-    
-    for i in range(N_SEGMENTS + 1):
-        r_i = X_sol[0, i]
-        V_i = X_sol[3, i]
-        h_i = r_i - mars.radius
-        
-        rho_i = mars.rho0 * np.exp(-h_i / mars.Hs)
-        q_i = 0.5 * rho_i * V_i**2
-        
+    RD_all = np.array(RD_all)
+    RC_all = np.array(RC_all)
+
+    # ===== FIGURE 1: LAT/LON FOOTPRINT =====
+    fig1, axes1 = plt.subplots(2, 2, figsize=(14, 10))
+
+    # 1) Altitude contour on lat/lon
+    levels_alt = 5
+    cf0 = axes1[0,0].tricontourf(lon, lat, alt, levels=levels_alt, cmap='viridis')
+    cs0 = axes1[0,0].tricontour(lon, lat, alt, levels=levels_alt, colors='k', linewidths=0.6)
+    axes1[0,0].clabel(cs0, fmt="%.1f", fontsize=8)
+    axes1[0,0].scatter(np.rad2deg(best['lon']), np.rad2deg(best['lat']),
+                       marker='*', s=300, c='red', edgecolors='white', linewidth=1.5,
+                       label='Best target', zorder=10)
+    cbar0 = fig1.colorbar(cf0, ax=axes1[0,0], label='Altitude [km]')
+    axes1[0,0].set_xlabel('Longitude [deg]')
+    axes1[0,0].set_ylabel('Latitude [deg]')
+    axes1[0,0].set_title('Deployment Altitude Footprint')
+    axes1[0,0].grid(True, alpha=0.3)
+    axes1[0,0].legend()
+
+    # 2) Maximum dynamic pressure on lat/lon
+    levels_q = 12
+    q_kPa = q / 1e3  # convert Pa to kPa
+    cf1 = axes1[0,1].tricontourf(lon, lat, q_kPa, levels=levels_q, cmap='plasma')
+    cs1 = axes1[0,1].tricontour(lon, lat, q_kPa, levels=levels_q, colors='k', linewidths=0.6)
+    axes1[0,1].clabel(cs1, fmt="%.1f", fontsize=8)
+    cbar1 = fig1.colorbar(cf1, ax=axes1[0,1], label='Max q [kPa]')
+    axes1[0,1].text(0.02, 0.98, f'Limit: {cons.q_max/1e3:.1f} kPa', 
+                  transform=axes1[0,1].transAxes, fontsize=10, color='white',
+                  verticalalignment='top', bbox=dict(boxstyle='round', facecolor='black', alpha=0.5))
+    axes1[0,1].set_xlabel('Longitude [deg]')
+    axes1[0,1].set_ylabel('Latitude [deg]')
+    axes1[0,1].set_title('Maximum Dynamic Pressure')
+    axes1[0,1].grid(True, alpha=0.3)
+
+    # 3) Maximum acceleration on lat/lon
+    levels_a = 12
+    cf2 = axes1[1,0].tricontourf(lon, lat, A, levels=levels_a, cmap='hot')
+    cs2 = axes1[1,0].tricontour(lon, lat, A, levels=levels_a, colors='k', linewidths=0.6)
+    axes1[1,0].clabel(cs2, fmt="%.2f", fontsize=8)
+    cbar2 = fig1.colorbar(cf2, ax=axes1[1,0], label='Max A [g]')
+    axes1[1,0].text(0.02, 0.98, f'Limit: {cons.A_max:.1f} g', 
+                  transform=axes1[1,0].transAxes, fontsize=10, color='white',
+                  verticalalignment='top', bbox=dict(boxstyle='round', facecolor='black', alpha=0.5))
+    axes1[1,0].set_xlabel('Longitude [deg]')
+    axes1[1,0].set_ylabel('Latitude [deg]')
+    axes1[1,0].set_title('Maximum Acceleration')
+    axes1[1,0].grid(True, alpha=0.3)
+
+    # 4) Maximum heat rate on lat/lon
+    levels_qd = 12
+    Qdot_kW = Q / 1e3  # convert W/m^2 to kW/m^2
+    cf3 = axes1[1,1].tricontourf(lon, lat, Qdot_kW, levels=levels_qd, cmap='inferno')
+    cs3 = axes1[1,1].tricontour(lon, lat, Qdot_kW, levels=levels_qd, colors='k', linewidths=0.6)
+    axes1[1,1].clabel(cs3, fmt="%.1f", fontsize=8)
+    cbar3 = fig1.colorbar(cf3, ax=axes1[1,1], label='Max Q̇ [kW/m²]')
+    axes1[1,1].text(0.02, 0.98, f'Limit: {cons.Qdot_max/1e3:.0f} kW/m²', 
+                  transform=axes1[1,1].transAxes, fontsize=10, color='white',
+                  verticalalignment='top', bbox=dict(boxstyle='round', facecolor='black', alpha=0.5))
+    axes1[1,1].set_xlabel('Longitude [deg]')
+    axes1[1,1].set_ylabel('Latitude [deg]')
+    axes1[1,1].set_title('Maximum Heat Rate')
+    axes1[1,1].grid(True, alpha=0.3)
+
+    plt.suptitle('Reachable Set: Lat/Lon Footprint', fontsize=14, y=0.995)
+    plt.tight_layout()
+
+    # ===== FIGURE 2: DOWNRANGE/CROSSRANGE FOOTPRINT =====
+    fig2, axes2 = plt.subplots(2, 2, figsize=(14, 10))
+
+    # 1) Altitude contour on downrange/crossrange
+    cf0_dr = axes2[0,0].tricontourf(RD_all, RC_all, alt, levels=levels_alt, cmap='viridis')
+    cs0_dr = axes2[0,0].tricontour(RD_all, RC_all, alt, levels=levels_alt, colors='k', linewidths=0.6)
+    axes2[0,0].clabel(cs0_dr, fmt="%.1f", fontsize=8)
+    axes2[0,0].scatter(best['downrange_km'], best['crossrange_km'],
+                       marker='*', s=300, c='red', edgecolors='white', linewidth=1.5,
+                       label='Best target', zorder=10)
+    cbar0_dr = fig2.colorbar(cf0_dr, ax=axes2[0,0], label='Altitude [km]')
+    axes2[0,0].set_xlabel('Downrange [km]')
+    axes2[0,0].set_ylabel('Crossrange [km]')
+    axes2[0,0].set_title('Deployment Altitude Footprint')
+    axes2[0,0].grid(True, alpha=0.3)
+    axes2[0,0].legend()
+
+    # 2) Maximum dynamic pressure on downrange/crossrange
+    cf1_dr = axes2[0,1].tricontourf(RD_all, RC_all, q_kPa, levels=levels_q, cmap='plasma')
+    cs1_dr = axes2[0,1].tricontour(RD_all, RC_all, q_kPa, levels=levels_q, colors='k', linewidths=0.6)
+    axes2[0,1].clabel(cs1_dr, fmt="%.1f", fontsize=8)
+    cbar1_dr = fig2.colorbar(cf1_dr, ax=axes2[0,1], label='Max q [kPa]')
+    axes2[0,1].text(0.02, 0.98, f'Limit: {cons.q_max/1e3:.1f} kPa', 
+                  transform=axes2[0,1].transAxes, fontsize=10, color='white',
+                  verticalalignment='top', bbox=dict(boxstyle='round', facecolor='black', alpha=0.5))
+    axes2[0,1].set_xlabel('Downrange [km]')
+    axes2[0,1].set_ylabel('Crossrange [km]')
+    axes2[0,1].set_title('Maximum Dynamic Pressure')
+    axes2[0,1].grid(True, alpha=0.3)
+
+    # 3) Maximum acceleration on downrange/crossrange
+    cf2_dr = axes2[1,0].tricontourf(RD_all, RC_all, A, levels=levels_a, cmap='hot')
+    cs2_dr = axes2[1,0].tricontour(RD_all, RC_all, A, levels=levels_a, colors='k', linewidths=0.6)
+    axes2[1,0].clabel(cs2_dr, fmt="%.2f", fontsize=8)
+    cbar2_dr = fig2.colorbar(cf2_dr, ax=axes2[1,0], label='Max A [g]')
+    axes2[1,0].text(0.02, 0.98, f'Limit: {cons.A_max:.1f} g', 
+                  transform=axes2[1,0].transAxes, fontsize=10, color='white',
+                  verticalalignment='top', bbox=dict(boxstyle='round', facecolor='black', alpha=0.5))
+    axes2[1,0].set_xlabel('Downrange [km]')
+    axes2[1,0].set_ylabel('Crossrange [km]')
+    axes2[1,0].set_title('Maximum Acceleration')
+    axes2[1,0].grid(True, alpha=0.3)
+
+    # 4) Maximum heat rate on downrange/crossrange
+    cf3_dr = axes2[1,1].tricontourf(RD_all, RC_all, Qdot_kW, levels=levels_qd, cmap='inferno')
+    cs3_dr = axes2[1,1].tricontour(RD_all, RC_all, Qdot_kW, levels=levels_qd, colors='k', linewidths=0.6)
+    axes2[1,1].clabel(cs3_dr, fmt="%.1f", fontsize=8)
+    cbar3_dr = fig2.colorbar(cf3_dr, ax=axes2[1,1], label='Max Q̇ [kW/m²]')
+    axes2[1,1].text(0.02, 0.98, f'Limit: {cons.Qdot_max/1e3:.0f} kW/m²', 
+                  transform=axes2[1,1].transAxes, fontsize=10, color='white',
+                  verticalalignment='top', bbox=dict(boxstyle='round', facecolor='black', alpha=0.5))
+    axes2[1,1].set_xlabel('Downrange [km]')
+    axes2[1,1].set_ylabel('Crossrange [km]')
+    axes2[1,1].set_title('Maximum Heat Rate')
+    axes2[1,1].grid(True, alpha=0.3)
+
+    plt.suptitle('Reachable Set: Downrange/Crossrange Footprint', fontsize=14, y=0.995)
+    plt.tight_layout()
+    plt.show()
+
+def simulate_and_plot_candidate(best, dt=0.25):
+    """
+    Simulate the selected reachable-set candidate with its normalized bank profile
+    and plot state and load histories + ground track.
+    """
+    sigma1_rad = np.deg2rad(best['sigma1'])
+    sigma2_rad = np.deg2rad(best['sigma2'])
+    T = best['t_dep']
+
+    t = 0.0
+    state = state0.copy()
+
+    t_hist = [t]
+    h_hist = [(state[0]-mars.radius)/1e3]
+    V_hist = [state[3]]
+    gam_hist = [np.rad2deg(state[4])]
+    psi_hist = [np.rad2deg(state[5])]
+    lat_hist = [np.rad2deg(state[2])]
+    lon_hist = [np.rad2deg(state[1])]
+    q_hist, A_hist, Qdot_hist = [], [], []
+    sigma_hist = []
+    mach_hist = []
+
+    while t < T + dt:
+        sigma = bank_profile_three_section(t, T, sigma1_rad, sigma2_rad)
+        h, q, A, Qdot = aero_loads(state)
+        a = mars.sound_speed(h)
+        mach = state[3] / max(a, 1e-6)
+
+        q_hist.append(q)
+        A_hist.append(A)
+        Qdot_hist.append(Qdot)
+        sigma_hist.append(np.rad2deg(sigma))
+        mach_hist.append(mach)
+
+        state = rk4_step(eom_numpy, state, sigma, dt)
+        t += dt
+
+        t_hist.append(t)
+        h_hist.append((state[0] - mars.radius)/1e3)
+        V_hist.append(state[3])
+        gam_hist.append(np.rad2deg(state[4]))
+        psi_hist.append(np.rad2deg(state[5]))
+        lat_hist.append(np.rad2deg(state[2]))
+        lon_hist.append(np.rad2deg(state[1]))
+
+        if deploy_trigger(h, state[3], q) or h <= 0:
+            break
+
+    fig, axs = plt.subplots(3, 3, figsize=(15, 10))
+    axs = axs.flatten()
+
+    axs[0].plot(t_hist, h_hist); axs[0].set_title('Altitude [km]'); axs[0].grid(True)
+    axs[1].plot(t_hist, V_hist); axs[1].set_title('Velocity [m/s]'); axs[1].grid(True)
+    axs[2].plot(t_hist, gam_hist); axs[2].set_title('Flight Path Angle [deg]'); axs[2].grid(True)
+
+    axs[3].plot(t_hist, psi_hist); axs[3].set_title('Heading [deg]'); axs[3].grid(True)
+    axs[4].plot(t_hist[:-1], sigma_hist); axs[4].set_title('Bank Angle [deg]'); axs[4].grid(True)
+    axs[5].plot(t_hist[:-1], mach_hist); axs[5].set_title('Mach'); axs[5].grid(True)
+    axs[5].axhspan(deploy.mach_min, deploy.mach_max, alpha=0.2, color='green')
+
+    axs[6].plot(t_hist[:-1], np.array(q_hist)/1e3); axs[6].set_title('Dynamic Pressure [kPa]'); axs[6].grid(True)
+    axs[6].axhline(cons.q_max/1e3, ls='--', color='r')
+    axs[6].axhspan(deploy.q_min/1e3, deploy.q_max/1e3, alpha=0.2, color='green')
+
+    axs[7].plot(t_hist[:-1], A_hist); axs[7].set_title('Load Factor [g]'); axs[7].grid(True)
+    axs[7].axhline(cons.A_max, ls='--', color='r')
+
+    axs[8].plot(t_hist[:-1], np.array(Qdot_hist)/1e3); axs[8].set_title('Heat Rate [kW/m²]'); axs[8].grid(True)
+    axs[8].axhline(cons.Qdot_max/1e3, ls='--', color='r')
+
+    plt.suptitle('Selected Reachable-Set Candidate Trajectory', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.show()
+
+    # Ground track
+    plt.figure(figsize=(8,6))
+    plt.plot(lon_hist, lat_hist, 'b-', lw=2, label='Candidate')
+    plt.plot(lon_hist[0], lat_hist[0], 'go', ms=10, label='Entry')
+    plt.plot(lon_hist[-1], lat_hist[-1], 'r*', ms=15, label='Deploy')
+    plt.xlabel('Longitude [deg]')
+    plt.ylabel('Latitude [deg]')
+    plt.title('Ground Track (Candidate)', fontsize=13, fontweight='bold')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+def plot_optimized_trajectory(X, U, dt):
+    t = np.arange(X.shape[1]) * dt
+    r   = X[0,:]
+    lon = X[1,:]
+    lat = X[2,:]
+    V   = X[3,:]
+    gam = X[4,:]
+    psi = X[5,:]
+    h   = (r - mars.radius)/1e3
+    sigma = np.append(U, U[-1])
+
+    # compute loads + Mach
+    q_hist, A_hist, Qdot_hist, mach_hist = [], [], [], []
+    for i in range(len(t)):
+        state_i = X[:,i]
+        h_i = state_i[0] - mars.radius
+        V_i = state_i[3]
+        rho_i = mars.density(h_i)
         D_i = 0.5 * rho_i * V_i**2 / veh.beta
         L_i = veh.L_over_D * D_i
+        q_i = 0.5 * rho_i * V_i**2
         A_i = np.sqrt(D_i**2 + L_i**2) / 9.80665
-        
         Qdot_i = veh.k_heat_flux * (rho_i**veh.N) * (V_i**veh.M)
-        
-        h_km_i = h_i / 1e3
-        T_i = 1.4e-13 * h_km_i**3 - 8.85e-9 * h_km_i**2 - 1.245e-3 * h_km_i + 205.36
-        a_i = np.sqrt(mars.gamma_gas * mars.R_gas * max(T_i, 1.0))
+        a_i = mars.sound_speed(h_i)
         mach_i = V_i / max(a_i, 1e-6)
-        
-        hist["rho"].append(rho_i)
-        hist["q"].append(q_i)
-        hist["mach"].append(mach_i)
-        hist["A"].append(A_i)
-        hist["Qdot"].append(Qdot_i)
-    
-    for key in ["rho", "q", "mach", "A", "Qdot"]:
-        hist[key] = np.array(hist[key])
-    
-    print(f"\nSolution time: {elapsed:.1f} s")
-    print(f"Final altitude: {hist['h'][-1]:.2f} km")
-    print(f"Final lat: {np.rad2deg(hist['lat'][-1]):.3f}°, lon: {np.rad2deg(hist['lon'][-1]):.3f}°")
-    print(f"Final Mach: {hist['mach'][-1]:.2f}")
-    print(f"Final q: {hist['q'][-1]:.1f} Pa")
-    print(f"Miss distance: {sol.value(miss_distance)/1e3:.2f} km")
-    print(f"Trajectory duration: {t_sol[-1]:.1f} s")
-    print(f"Time step: {dt_sol:.3f} s")
-    
-    return hist, success
+        q_hist.append(q_i); A_hist.append(A_i); Qdot_hist.append(Qdot_i); mach_hist.append(mach_i)
 
-# ============================================================
-# COMPREHENSIVE PLOTTING
-# ============================================================
+    q_hist = np.array(q_hist); A_hist = np.array(A_hist)
+    Qdot_hist = np.array(Qdot_hist); mach_hist = np.array(mach_hist)
 
-def plot_comprehensive_results(best_target, all_samples, RD_all, RC_all, hist_opt):
-    """Create comprehensive plots of reachable set and optimized trajectory."""
-    
-    # Extract reachable set data
-    lat_all = all_samples[:, 0]
-    lon_all = all_samples[:, 1]
-    ALT_all = all_samples[:, 2]
-    q_all = all_samples[:, 3]
-    A_all = all_samples[:, 4]
-    Qdot_all = all_samples[:, 5]
-    
-    # ===== FIGURE 1: REACHABLE SET FOOTPRINTS =====
-    fig1 = plt.figure(figsize=(16, 12))
-    
-    # Lat/Lon footprint
-    ax1 = plt.subplot(2, 2, 1)
-    sc1 = ax1.scatter(np.rad2deg(lon_all), np.rad2deg(lat_all), 
-                      c=ALT_all, cmap='viridis', s=50, alpha=0.6)
-    ax1.plot(np.rad2deg(best_target['lon']), np.rad2deg(best_target['lat']), 
-             'r*', ms=25, label='Best Target', markeredgecolor='darkred', markeredgewidth=2)
-    ax1.set_xlabel('Longitude [deg]', fontsize=11)
-    ax1.set_ylabel('Latitude [deg]', fontsize=11)
-    ax1.set_title('Reachable Set: Lat/Lon Footprint', fontsize=12, fontweight='bold')
-    ax1.legend(fontsize=10)
-    ax1.grid(True, alpha=0.3)
-    plt.colorbar(sc1, ax=ax1, label='Altitude [km]')
-    
-    # Downrange/Crossrange footprint
-    ax2 = plt.subplot(2, 2, 2)
-    sc2 = ax2.scatter(RD_all, RC_all, c=ALT_all, cmap='viridis', s=50, alpha=0.6)
-    ax2.plot(best_target['downrange'], best_target['crossrange'], 
-             'r*', ms=25, label='Best Target', markeredgecolor='darkred', markeredgewidth=2)
-    ax2.set_xlabel('Downrange [km]', fontsize=11)
-    ax2.set_ylabel('Crossrange [km]', fontsize=11)
-    ax2.set_title('Reachable Set: Downrange/Crossrange', fontsize=12, fontweight='bold')
-    ax2.legend(fontsize=10)
-    ax2.grid(True, alpha=0.3)
-    plt.colorbar(sc2, ax=ax2, label='Altitude [km]')
-    
-    # Max acceleration footprint
-    ax3 = plt.subplot(2, 2, 3)
-    sc3 = ax3.scatter(RD_all, RC_all, c=A_all, cmap='hot', s=50, alpha=0.6, vmax=constraints.A_max)
-    ax3.plot(best_target['downrange'], best_target['crossrange'], 
-             'b*', ms=25, label='Best Target', markeredgecolor='darkblue', markeredgewidth=2)
-    ax3.set_xlabel('Downrange [km]', fontsize=11)
-    ax3.set_ylabel('Crossrange [km]', fontsize=11)
-    ax3.set_title('Max Acceleration [g]', fontsize=12, fontweight='bold')
-    ax3.legend(fontsize=10)
-    ax3.grid(True, alpha=0.3)
-    plt.colorbar(sc3, ax=ax3, label='Max A [g]')
-    
-    # Max dynamic pressure footprint
-    ax4 = plt.subplot(2, 2, 4)
-    sc4 = ax4.scatter(RD_all, RC_all, c=q_all/1e3, cmap='plasma', s=50, alpha=0.6, vmax=constraints.q_max/1e3)
-    ax4.plot(best_target['downrange'], best_target['crossrange'], 
-             'g*', ms=25, label='Best Target', markeredgecolor='darkgreen', markeredgewidth=2)
-    ax4.set_xlabel('Downrange [km]', fontsize=11)
-    ax4.set_ylabel('Crossrange [km]', fontsize=11)
-    ax4.set_title('Max Dynamic Pressure [kPa]', fontsize=12, fontweight='bold')
-    ax4.legend(fontsize=10)
-    ax4.grid(True, alpha=0.3)
-    plt.colorbar(sc4, ax=ax4, label='Max q [kPa]')
-    
+    # sigma derivatives
+    sigma_dot = np.gradient(sigma, dt)
+    sigma_ddot = np.gradient(sigma_dot, dt)
+
+    fig, axs = plt.subplots(4, 3, figsize=(16, 12))
+    axs = axs.flatten()
+
+    axs[0].plot(t, h); axs[0].set_title('Altitude [km]'); axs[0].grid(True)
+    axs[1].plot(t, V); axs[1].set_title('Velocity [m/s]'); axs[1].grid(True)
+    axs[2].plot(t, np.rad2deg(gam)); axs[2].set_title('Flight Path Angle [deg]'); axs[2].grid(True)
+
+    axs[3].plot(t, np.rad2deg(psi)); axs[3].set_title('Heading [deg]'); axs[3].grid(True)
+    axs[4].plot(t, np.rad2deg(sigma)); axs[4].set_title('Bank Angle [deg]'); axs[4].grid(True)
+    axs[4].axhline(cons.sigma_max, ls='--', color='r'); axs[4].axhline(-cons.sigma_max, ls='--', color='r')
+
+    axs[5].plot(t, mach_hist); axs[5].set_title('Mach'); axs[5].grid(True)
+    axs[5].axhspan(deploy.mach_min, deploy.mach_max, alpha=0.2, color='green')
+
+    axs[6].plot(t, q_hist/1e3); axs[6].set_title('Dynamic Pressure [kPa]'); axs[6].grid(True)
+    axs[6].axhline(cons.q_max/1e3, ls='--', color='r')
+    axs[6].axhspan(deploy.q_min/1e3, deploy.q_max/1e3, alpha=0.2, color='green')
+
+    axs[7].plot(t, A_hist); axs[7].set_title('Load [g]'); axs[7].grid(True)
+    axs[7].axhline(cons.A_max, ls='--', color='r')
+
+    axs[8].plot(t, Qdot_hist/1e3); axs[8].set_title('Heat Rate [kW/m²]'); axs[8].grid(True)
+    axs[8].axhline(cons.Qdot_max/1e3, ls='--', color='r')
+
+    axs[9].plot(t, np.rad2deg(sigma_dot)); axs[9].set_title('Bank Rate [deg/s]'); axs[9].grid(True)
+    axs[9].axhline(cons.sigma_dot_max, ls='--', color='r')
+    axs[9].axhline(-cons.sigma_dot_max, ls='--', color='r')
+
+    axs[10].plot(t, np.rad2deg(sigma_ddot)); axs[10].set_title('Bank Accel [deg/s²]'); axs[10].grid(True)
+    axs[10].axhline(cons.sigma_ddot_max, ls='--', color='r')
+    axs[10].axhline(-cons.sigma_ddot_max, ls='--', color='r')
+
+    plt.suptitle('Optimized Trajectory: States, Loads, Controls', fontsize=14, fontweight='bold')
     plt.tight_layout()
-    
-    # ===== FIGURE 2: OPTIMIZED TRAJECTORY TIME HISTORIES =====
-    fig2 = plt.figure(figsize=(16, 12))
-    
-    t = hist_opt["t"]
-    h = hist_opt["h"]
-    V = hist_opt["V"]
-    gam = np.rad2deg(hist_opt["gam"])
-    psi = np.rad2deg(hist_opt["psi"])
-    sigma = np.rad2deg(hist_opt["sigma"])
-    q = hist_opt["q"]
-    mach = hist_opt["mach"]
-    A = hist_opt["A"]
-    Qdot = hist_opt["Qdot"]
-    
-    # Calculate control rates
-    sigma_rad = hist_opt["sigma"]
-    sigma_dot = np.gradient(sigma_rad, t)
-    sigma_ddot = np.gradient(sigma_dot, t)
-    
-    axes = []
-    for i in range(9):
-        axes.append(plt.subplot(3, 3, i+1))
-    
-    # Altitude
-    axes[0].plot(t, h, 'b-', lw=2)
-    axes[0].set_xlabel('Time [s]')
-    axes[0].set_ylabel('Altitude [km]')
-    axes[0].set_title('Altitude')
-    axes[0].grid(True, alpha=0.3)
-    
-    # Velocity
-    axes[1].plot(t, V, 'r-', lw=2)
-    axes[1].set_xlabel('Time [s]')
-    axes[1].set_ylabel('Velocity [m/s]')
-    axes[1].set_title('Velocity')
-    axes[1].grid(True, alpha=0.3)
-    
-    # Dynamic pressure
-    axes[2].plot(t, q/1e3, 'g-', lw=2)
-    axes[2].axhline(constraints.q_max/1e3, ls='--', color='red', alpha=0.5, label='Limit')
-    axes[2].set_xlabel('Time [s]')
-    axes[2].set_ylabel('q [kPa]')
-    axes[2].set_title('Dynamic Pressure')
-    axes[2].legend(fontsize=8)
-    axes[2].grid(True, alpha=0.3)
-    
-    # Mach number
-    axes[3].plot(t, mach, 'purple', lw=2)
-    axes[3].set_xlabel('Time [s]')
-    axes[3].set_ylabel('Mach [-]')
-    axes[3].set_title('Mach Number')
-    axes[3].grid(True, alpha=0.3)
-    
-    # Flight path angle
-    axes[4].plot(t, gam, 'orange', lw=2)
-    axes[4].set_xlabel('Time [s]')
-    axes[4].set_ylabel('γ [deg]')
-    axes[4].set_title('Flight Path Angle')
-    axes[4].grid(True, alpha=0.3)
-    
-    # Heading angle
-    axes[5].plot(t, psi, 'brown', lw=2)
-    axes[5].set_xlabel('Time [s]')
-    axes[5].set_ylabel('ψ [deg]')
-    axes[5].set_title('Heading Angle')
-    axes[5].grid(True, alpha=0.3)
-    
-    # Bank angle
-    axes[6].plot(t, sigma, 'k-', lw=2)
-    axes[6].axhline(81, ls='--', color='red', alpha=0.5, label='Limit')
-    axes[6].axhline(-81, ls='--', color='red', alpha=0.5)
-    axes[6].set_xlabel('Time [s]')
-    axes[6].set_ylabel('σ [deg]')
-    axes[6].set_title('Bank Angle')
-    axes[6].legend(fontsize=8)
-    axes[6].grid(True, alpha=0.3)
-    
-    # Bank rate
-    axes[7].plot(t, np.rad2deg(sigma_dot), 'b-', lw=2)
-    axes[7].axhline(20, ls='--', color='red', alpha=0.5, label='Limit')
-    axes[7].axhline(-20, ls='--', color='red', alpha=0.5)
-    axes[7].set_xlabel('Time [s]')
-    axes[7].set_ylabel('σ̇ [deg/s]')
-    axes[7].set_title('Bank Rate')
-    axes[7].legend(fontsize=8)
-    axes[7].grid(True, alpha=0.3)
-    
-    # Bank acceleration
-    axes[8].plot(t, np.rad2deg(sigma_ddot), 'r-', lw=2)
-    axes[8].axhline(5, ls='--', color='red', alpha=0.5, label='Limit')
-    axes[8].axhline(-5, ls='--', color='red', alpha=0.5)
-    axes[8].set_xlabel('Time [s]')
-    axes[8].set_ylabel('σ̈ [deg/s²]')
-    axes[8].set_title('Bank Acceleration')
-    axes[8].legend(fontsize=8)
-    axes[8].grid(True, alpha=0.3)
-    
-    plt.suptitle('Optimized Trajectory: State and Control Histories', fontsize=14, fontweight='bold', y=0.995)
+    plt.show()
+
+    # Ground track
+    plt.figure(figsize=(8,6))
+    plt.scatter(np.rad2deg(lon), np.rad2deg(lat), c=h, cmap='viridis', s=40, edgecolors='k', linewidth=0.5)
+    plt.plot(np.rad2deg(lon), np.rad2deg(lat), 'k-', alpha=0.3)
+    plt.scatter(np.rad2deg(lon[0]), np.rad2deg(lat[0]), c='green', s=80, label='Entry')
+    plt.scatter(np.rad2deg(lon[-1]), np.rad2deg(lat[-1]), c='red', s=80, marker='*', label='Deploy')
+    plt.xlabel('Longitude [deg]'); plt.ylabel('Latitude [deg]')
+    plt.title('Optimized Ground Track (colored by altitude)', fontsize=13, fontweight='bold')
+    plt.grid(True, alpha=0.3); plt.legend()
+    cbar = plt.colorbar(); cbar.set_label('Altitude [km]')
     plt.tight_layout()
-    
-    # ===== FIGURE 3: PATH CONSTRAINTS =====
-    fig3, axes3 = plt.subplots(2, 2, figsize=(14, 10))
-    axes3 = axes3.flatten()
-    
-    # Acceleration
-    axes3[0].plot(t, A, 'r-', lw=2.5, label='Acceleration')
-    axes3[0].axhline(constraints.A_max, ls='--', color='red', alpha=0.5, lw=2, label='Limit')
-    axes3[0].set_xlabel('Time [s]', fontsize=11)
-    axes3[0].set_ylabel('Acceleration [g]', fontsize=11)
-    axes3[0].set_title('Total Acceleration', fontsize=12, fontweight='bold')
-    axes3[0].legend(fontsize=10)
-    axes3[0].grid(True, alpha=0.3)
-    
-    # Dynamic pressure
-    axes3[1].plot(t, q/1e3, 'g-', lw=2.5, label='Dynamic Pressure')
-    axes3[1].axhline(constraints.q_max/1e3, ls='--', color='red', alpha=0.5, lw=2, label='Limit')
-    axes3[1].set_xlabel('Time [s]', fontsize=11)
-    axes3[1].set_ylabel('q [kPa]', fontsize=11)
-    axes3[1].set_title('Dynamic Pressure', fontsize=12, fontweight='bold')
-    axes3[1].legend(fontsize=10)
-    axes3[1].grid(True, alpha=0.3)
-    
-    # Heat rate
-    axes3[2].plot(t, Qdot/1e3, 'orange', lw=2.5, label='Heat Rate')
-    axes3[2].axhline(constraints.Qdot_max/1e3, ls='--', color='red', alpha=0.5, lw=2, label='Limit')
-    axes3[2].set_xlabel('Time [s]', fontsize=11)
-    axes3[2].set_ylabel('Heat Rate [kW/m²]', fontsize=11)
-    axes3[2].set_title('Heat Rate', fontsize=12, fontweight='bold')
-    axes3[2].legend(fontsize=10)
-    axes3[2].grid(True, alpha=0.3)
-    
-     # Altitude-Velocity envelope (consistent with deploy_region)
-    V_range = np.linspace(300.0, 500.0, 300)   # [m/s]
-    h_grid  = np.linspace(deploy_region.h_min, 20e3, 400)  # [m]
-
-    h_lower = np.full_like(V_range, np.nan, dtype=float)
-    h_upper = np.full_like(V_range, np.nan, dtype=float)
-
-    for i, V_i in enumerate(V_range):
-        # Atmospheric quantities on the altitude grid
-        rho = mars.rho0 * np.exp(-h_grid / mars.Hs)
-        q   = 0.5 * rho * V_i**2
-
-        # Mach number using the same sound speed model
-        a = np.array([mars.sound_speed(h) for h in h_grid])
-        mach = V_i / np.maximum(a, 1e-6)
-
-        mask = (
-            (deploy_region.mach_min <= mach) &
-            (mach <= deploy_region.mach_max) &
-            (deploy_region.q_min    <= q) &
-            (q <= deploy_region.q_max)
-        )
-
-        if np.any(mask):
-            h_valid_km = h_grid[mask] / 1e3
-            h_lower[i] = h_valid_km.min()
-            h_upper[i] = h_valid_km.max()
-
-    valid = ~np.isnan(h_lower) & ~np.isnan(h_upper)
-
-    axes3[3].fill_between(
-        V_range[valid], h_lower[valid], h_upper[valid],
-        alpha=0.3, color='green', label='Safe Envelope'
-    )
-    axes3[3].plot(V_range[valid], h_lower[valid], 'g-', lw=2)
-    axes3[3].plot(V_range[valid], h_upper[valid], 'g-', lw=2)
-
-    # Plot trajectory and final deployment point
-    axes3[3].plot(V, h, 'k-', lw=2.5, label='Trajectory', zorder=5)
-    axes3[3].plot(V[-1], h[-1], 'r*', ms=20, label='Deployment', zorder=10,
-                  markeredgecolor='darkred', markeredgewidth=1.5)
-
-    axes3[3].set_xlabel('Velocity [m/s]', fontsize=11)
-    axes3[3].set_ylabel('Altitude [km]', fontsize=11)
-    axes3[3].set_title('Altitude-Velocity Envelope', fontsize=12, fontweight='bold')
-    axes3[3].legend(fontsize=10)
-    axes3[3].grid(True, alpha=0.3)
-
-    
-    plt.suptitle('Path Constraints Verification', fontsize=14, fontweight='bold', y=0.995)
-    plt.tight_layout()
-    
-    # ===== FIGURE 4: GROUND TRACK =====
-    fig4, ax4 = plt.subplots(figsize=(12, 10))
-    
-    lat_traj = np.rad2deg(hist_opt["lat"])
-    lon_traj = np.rad2deg(hist_opt["lon"])
-    
-    # Plot reachable set
-    ax4.scatter(np.rad2deg(lon_all), np.rad2deg(lat_all), 
-                c='lightgray', s=30, alpha=0.4, label='Reachable Set')
-    
-    # Plot optimized trajectory
-    sc4 = ax4.scatter(lon_traj, lat_traj, c=t, cmap='viridis', s=50, 
-                      label='Optimized Trajectory', zorder=3, edgecolors='k', linewidths=0.5)
-    
-    # Mark important points
-    ax4.plot(np.rad2deg(lon0), np.rad2deg(lat0), 'go', ms=15, 
-             label='Entry', zorder=5, markeredgecolor='darkgreen', markeredgewidth=2)
-    ax4.plot(lon_traj[-1], lat_traj[-1], 'bs', ms=15, 
-             label='Deployment', zorder=5, markeredgecolor='darkblue', markeredgewidth=2)
-    ax4.plot(np.rad2deg(best_target['lon']), np.rad2deg(best_target['lat']), 
-             'r*', ms=25, label='Target', zorder=5, markeredgecolor='darkred', markeredgewidth=2)
-    
-    ax4.set_xlabel('Longitude [deg]', fontsize=12)
-    ax4.set_ylabel('Latitude [deg]', fontsize=12)
-    ax4.set_title('Ground Track: Reachable Set + Optimized Trajectory', fontsize=13, fontweight='bold')
-    ax4.legend(loc='best', fontsize=11)
-    ax4.grid(True, alpha=0.3)
-    plt.colorbar(sc4, ax=ax4, label='Time [s]')
-    plt.tight_layout()
-    
     plt.show()
 
 # ============================================================
-# MAIN EXECUTION
+# 9️⃣ MAIN
 # ============================================================
 
 def main():
-    """Main execution: reachable set → target selection → collocation optimization."""
-    
-    print("\n" + "="*80)
-    print("INTEGRATED TRAJECTORY OPTIMIZATION")
-    print("="*80)
-    print("Step 1: Build reachable set via control parameter sweep")
-    print("Step 2: Select best target using cost function")
-    print("Step 3: Optimize trajectory to target using collocation")
-    print("="*80)
-    
-    # Step 1: Build reachable set
-    sigma1_grid = np.linspace(np.deg2rad(-81), np.deg2rad(81), 10)
-    sigma2_grid = np.linspace(np.deg2rad(-81), np.deg2rad(81), 10)
-    
-    all_samples = build_reachable_set(lat0, lon0, sigma1_grid, sigma2_grid, dt=0.25, tmax=4000.0)
-    
-    # Step 2: Find best target
-    result = find_best_target(all_samples, lat0, lon0)
-    
-    if result is None:
-        print("ERROR: Cannot proceed without valid target!")
+    print("\n================ REACHABLE SET =================")
+    samples = build_reachable_set(n_grid=9, dt=0.25, tmax=4000.0)
+    if not samples:
+        print("No valid trajectories in reachable set. Aborting.")
         return
-    
-    best_target, all_samples, RD_all, RC_all = result
-    
-    # Step 3: Optimize trajectory to target
-    hist_opt, success = solve_collocation_with_target(best_target)
-    
+
+    best = select_best_target(samples, max_crossrange_km=5.0)
+    if best is None:
+        print("No valid target found. Aborting.")
+        return
+
+    plot_reachable_set(samples, best)
+    simulate_and_plot_candidate(best)
+
+    print("\n================ OPTIMIZATION =================")
+    X_sol, U_sol, dt_sol, success = optimize_to_target(best, N=180)
+
     if not success:
-        print("\nWARNING: Optimization did not converge to optimal solution")
-        print("Plotting debug solution...")
-    
-    # Step 4: Plot comprehensive results
+        print("Warning: optimization may not have fully converged (debug solution).")
+
+    # ============================================================
+    # COMPREHENSIVE COMPARISON: REACHABLE vs OPTIMIZED
+    # ============================================================
     print("\n" + "="*80)
-    print("GENERATING COMPREHENSIVE PLOTS")
+    print("COMPREHENSIVE TRAJECTORY COMPARISON")
     print("="*80)
     
-    plot_comprehensive_results(best_target, all_samples, RD_all, RC_all, hist_opt)
+    # Extract final state from optimized trajectory
+    r_opt = X_sol[0, -1]
+    lon_opt = X_sol[1, -1]
+    lat_opt = X_sol[2, -1]
+    V_opt = X_sol[3, -1]
+    gam_opt = X_sol[4, -1]
+    psi_opt = X_sol[5, -1]
+    h_opt = r_opt - mars.radius
     
-    print("\n" + "="*80)
-    print("INTEGRATION COMPLETE")
-    print("="*80)
+    # Compute final loads for optimized trajectory
+    rho_opt = mars.density(h_opt)
+    D_opt = 0.5 * rho_opt * V_opt**2 / veh.beta
+    L_opt = veh.L_over_D * D_opt
+    q_opt = 0.5 * rho_opt * V_opt**2
+    A_opt = np.sqrt(D_opt**2 + L_opt**2) / 9.80665
+    Qdot_opt = veh.k_heat_flux * (rho_opt**veh.N) * (V_opt**veh.M)
+    a_opt = mars.sound_speed(h_opt)
+    mach_opt = V_opt / max(a_opt, 1e-6)
+    
+    # Compute trajectory duration and max loads for optimized
+    t_total_opt = dt_sol * len(U_sol)
+    max_q_opt = 0.0
+    max_A_opt = 0.0
+    max_Qdot_opt = 0.0
+    for i in range(X_sol.shape[1]):
+        h_i = X_sol[0, i] - mars.radius
+        V_i = X_sol[3, i]
+        rho_i = mars.density(h_i)
+        D_i = 0.5 * rho_i * V_i**2 / veh.beta
+        L_i = veh.L_over_D * D_i
+        q_i = 0.5 * rho_i * V_i**2
+        A_i = np.sqrt(D_i**2 + L_i**2) / 9.80665
+        Qdot_i = veh.k_heat_flux * (rho_i**veh.N) * (V_i**veh.M)
+        max_q_opt = max(max_q_opt, q_i)
+        max_A_opt = max(max_A_opt, A_i)
+        max_Qdot_opt = max(max_Qdot_opt, Qdot_i)
+    
+    # Extract reachable trajectory data
+    h_reach = best['h']
+    lat_reach = best['lat']
+    lon_reach = best['lon']
+    V_reach = best['V']
+    gam_reach = best['gam']
+    psi_reach = best['psi']
+    t_total_reach = best['t_dep']
+    max_q_reach = best['max_q']
+    max_A_reach = best['max_A']
+    max_Qdot_reach = best['max_Qdot']
+    q_reach = best['q_dep']
+    A_reach = best['A_dep']
+    Qdot_reach = best['Qdot_dep']
+    mach_reach = best['mach_dep']
+    
+    # Compute position difference using spherical_metrics
+    lat_ref = lat0 + np.deg2rad(1.0)
+    lon_ref = lon0
+    
+    # Compute metrics for reachable trajectory
+    _, _, _, RC_reach, RD_reach, _, _ = spherical_metrics(
+        lat0, lon0, lat_reach, lon_reach, lat_ref, lon_ref, mars.radius
+    )
+    
+    # Compute metrics for optimized trajectory
+    _, _, _, RC_opt, RD_opt, _, _ = spherical_metrics(
+        lat0, lon0, lat_opt, lon_opt, lat_ref, lon_ref, mars.radius
+    )
+    
+    # Position difference between optimized and reachable
+    dist_diff = great_circle_distance(lat_reach, lon_reach, lat_opt, lon_opt, mars.radius)
+    RC_diff = RC_opt - RC_reach
+    
+    print("\n" + "-"*80)
+    print("FINAL DEPLOYMENT STATE COMPARISON")
+    print("-"*80)
+    print(f"{'Metric':<30} {'Reachable':<20} {'Optimized':<20} {'Difference':<20}")
+    print("-"*80)
+    
+    # Altitude
+    h_diff_km = (h_opt - h_reach) / 1e3
+    h_diff_pct = 100 * (h_opt - h_reach) / h_reach
+    print(f"{'Altitude [km]':<30} {h_reach/1e3:>19.3f} {h_opt/1e3:>19.3f} {h_diff_km:>+18.3f} ({h_diff_pct:+.2f}%)")
+    
+    # Latitude
+    lat_diff_deg = np.rad2deg(lat_opt - lat_reach)
+    print(f"{'Latitude [deg]':<30} {np.rad2deg(lat_reach):>19.4f} {np.rad2deg(lat_opt):>19.4f} {lat_diff_deg:>+18.4f}")
+    
+    # Longitude
+    lon_diff_deg = np.rad2deg(lon_opt - lon_reach)
+    print(f"{'Longitude [deg]':<30} {np.rad2deg(lon_reach):>19.4f} {np.rad2deg(lon_opt):>19.4f} {lon_diff_deg:>+18.4f}")
+    
+    # Crossrange
+    RC_diff_pct = 100 * (RC_opt - RC_reach) / abs(RC_reach) if abs(RC_reach) > 1e-3 else 0.0
+    print(f"{'Crossrange [km]':<30} {RC_reach/1e3:>19.3f} {RC_opt/1e3:>19.3f} {RC_diff/1e3:>+18.3f} ({RC_diff_pct:+.2f}%)")
+    
+    # Downrange
+    RD_diff = RD_opt - RD_reach
+    RD_diff_pct = 100 * (RD_opt - RD_reach) / RD_reach
+    print(f"{'Downrange [km]':<30} {RD_reach/1e3:>19.3f} {RD_opt/1e3:>19.3f} {RD_diff/1e3:>+18.3f} ({RD_diff_pct:+.2f}%)")
+    
+    # Position miss distance
+    print(f"{'Position Miss Distance [km]':<30} {'(reference)':>19} {'(from reach)':>19} {dist_diff/1e3:>19.3f}")
+    
+    # Mach number
+    mach_diff = mach_opt - mach_reach
+    mach_diff_pct = 100 * (mach_opt - mach_reach) / mach_reach
+    print(f"{'Mach Number':<30} {mach_reach:>19.3f} {mach_opt:>19.3f} {mach_diff:>+18.3f} ({mach_diff_pct:+.2f}%)")
+    
+    # Dynamic pressure
+    q_diff = q_opt - q_reach
+    q_diff_pct = 100 * (q_opt - q_reach) / q_reach
+    print(f"{'Dynamic Pressure [Pa]':<30} {q_reach:>19.1f} {q_opt:>19.1f} {q_diff:>+18.1f} ({q_diff_pct:+.2f}%)")
+    
+    # Acceleration
+    A_diff = A_opt - A_reach
+    A_diff_pct = 100 * (A_opt - A_reach) / A_reach
+    print(f"{'Deceleration [g]':<30} {A_reach:>19.3f} {A_opt:>19.3f} {A_diff:>+18.3f} ({A_diff_pct:+.2f}%)")
+    
+    # Heat rate
+    Qdot_diff = Qdot_opt - Qdot_reach
+    Qdot_diff_pct = 100 * (Qdot_opt - Qdot_reach) / Qdot_reach
+    print(f"{'Heat Rate [W/m²]':<30} {Qdot_reach:>19.1f} {Qdot_opt:>19.1f} {Qdot_diff:>+18.1f} ({Qdot_diff_pct:+.2f}%)")
+    
+    # Velocity
+    V_diff = V_opt - V_reach
+    V_diff_pct = 100 * (V_opt - V_reach) / V_reach
+    print(f"{'Velocity [m/s]':<30} {V_reach:>19.2f} {V_opt:>19.2f} {V_diff:>+18.2f} ({V_diff_pct:+.2f}%)")
+    
+    # Flight path angle
+    gam_diff = np.rad2deg(gam_opt - gam_reach)
+    gam_diff_pct = 100 * (gam_opt - gam_reach) / gam_reach
+    print(f"{'Flight Path Angle [deg]':<30} {np.rad2deg(gam_reach):>19.3f} {np.rad2deg(gam_opt):>19.3f} {gam_diff:>+18.3f} ({gam_diff_pct:+.2f}%)")
+    
+    # Heading angle
+    psi_diff = np.rad2deg(psi_opt - psi_reach)
+    psi_diff_pct = 100 * (psi_opt - psi_reach) / psi_reach if abs(psi_reach) > 1e-6 else 0.0
+    print(f"{'Heading Angle [deg]':<30} {np.rad2deg(psi_reach):>19.3f} {np.rad2deg(psi_opt):>19.3f} {psi_diff:>+18.3f} ({psi_diff_pct:+.2f}%)")
+    
+    print("\n" + "-"*80)
+    print("TRAJECTORY HISTORY COMPARISON")
+    print("-"*80)
+    print(f"{'Metric':<30} {'Reachable':<20} {'Optimized':<20} {'Difference':<20}")
+    print("-"*80)
+    
+    # Duration
+    t_diff = t_total_opt - t_total_reach
+    t_diff_pct = 100 * (t_total_opt - t_total_reach) / t_total_reach
+    print(f"{'Trajectory Duration [s]':<30} {t_total_reach:>19.2f} {t_total_opt:>19.2f} {t_diff:>+18.2f} ({t_diff_pct:+.2f}%)")
+    
+    # Max dynamic pressure
+    max_q_diff = max_q_opt - max_q_reach
+    max_q_diff_pct = 100 * (max_q_opt - max_q_reach) / max_q_reach
+    print(f"{'Max Dynamic Pressure [Pa]':<30} {max_q_reach:>19.1f} {max_q_opt:>19.1f} {max_q_diff:>+18.1f} ({max_q_diff_pct:+.2f}%)")
+    
+    # Max acceleration
+    max_A_diff = max_A_opt - max_A_reach
+    max_A_diff_pct = 100 * (max_A_opt - max_A_reach) / max_A_reach
+    print(f"{'Max Deceleration [g]':<30} {max_A_reach:>19.3f} {max_A_opt:>19.3f} {max_A_diff:>+18.3f} ({max_A_diff_pct:+.2f}%)")
+    
+    # Max heat rate
+    max_Qdot_diff = max_Qdot_opt - max_Qdot_reach
+    max_Qdot_diff_pct = 100 * (max_Qdot_opt - max_Qdot_reach) / max_Qdot_reach
+    print(f"{'Max Heat Rate [W/m²]':<30} {max_Qdot_reach:>19.1f} {max_Qdot_opt:>19.1f} {max_Qdot_diff:>+18.1f} ({max_Qdot_diff_pct:+.2f}%)")
+    
+    print("\n" + "-"*80)
+    print("DEPLOYMENT ENVELOPE COMPLIANCE")
+    print("-"*80)
+    print(f"{'Constraint':<30} {'Limit':<20} {'Reachable':<20} {'Optimized':<20}")
+    print("-"*80)
+    
+    # Mach range
+    mach_reach_ok = "✓" if deploy.mach_min <= mach_reach <= deploy.mach_max else "✗"
+    mach_opt_ok = "✓" if deploy.mach_min <= mach_opt <= deploy.mach_max else "✗"
+    print(f"{'Mach Number':<30} {f'[{deploy.mach_min:.1f}, {deploy.mach_max:.1f}]':<20} {f'{mach_reach:.2f} {mach_reach_ok}':<20} {f'{mach_opt:.2f} {mach_opt_ok}':<20}")
+    
+    # Dynamic pressure range
+    q_reach_ok = "✓" if deploy.q_min <= q_reach <= deploy.q_max else "✗"
+    q_opt_ok = "✓" if deploy.q_min <= q_opt <= deploy.q_max else "✗"
+    print(f"{'Dynamic Pressure [Pa]':<30} {f'[{deploy.q_min:.0f}, {deploy.q_max:.0f}]':<20} {f'{q_reach:.0f} {q_reach_ok}':<20} {f'{q_opt:.0f} {q_opt_ok}':<20}")
+    
+    # Altitude minimum
+    h_reach_ok = "✓" if h_reach >= deploy.h_min else "✗"
+    h_opt_ok = "✓" if h_opt >= deploy.h_min else "✗"
+    print(f"{'Altitude [m]':<30} {f'>= {deploy.h_min:.0f}':<20} {f'{h_reach:.0f} {h_reach_ok}':<20} {f'{h_opt:.0f} {h_opt_ok}':<20}")
+    
+    print("\n" + "-"*80)
+    print("PATH CONSTRAINT COMPLIANCE")
+    print("-"*80)
+    print(f"{'Constraint':<30} {'Limit':<20} {'Reachable Max':<20} {'Optimized Max':<20}")
+    print("-"*80)
+    
+    # Dynamic pressure limit
+    max_q_reach_ok = "✓" if max_q_reach <= cons.q_max else "✗"
+    max_q_opt_ok = "✓" if max_q_opt <= cons.q_max else "✗"
+    print(f"{'Dynamic Pressure [Pa]':<30} {f'<= {cons.q_max:.0f}':<20} {f'{max_q_reach:.0f} {max_q_reach_ok}':<20} {f'{max_q_opt:.0f} {max_q_opt_ok}':<20}")
+    
+    # Acceleration limit
+    max_A_reach_ok = "✓" if max_A_reach <= cons.A_max else "✗"
+    max_A_opt_ok = "✓" if max_A_opt <= cons.A_max else "✗"
+    print(f"{'Deceleration [g]':<30} {f'<= {cons.A_max:.1f}':<20} {f'{max_A_reach:.2f} {max_A_reach_ok}':<20} {f'{max_A_opt:.2f} {max_A_opt_ok}':<20}")
+    
+    # Heat rate limit
+    max_Qdot_reach_ok = "✓" if max_Qdot_reach <= cons.Qdot_max else "✗"
+    max_Qdot_opt_ok = "✓" if max_Qdot_opt <= cons.Qdot_max else "✗"
+    print(f"{'Heat Rate [W/m²]':<30} {f'<= {cons.Qdot_max:.0f}':<20} {f'{max_Qdot_reach:.0f} {max_Qdot_reach_ok}':<20} {f'{max_Qdot_opt:.0f} {max_Qdot_opt_ok}':<20}")
+    
+    print("\n" + "-"*80)
+    print("CONTROL STRATEGY COMPARISON")
+    print("-"*80)
+    
+    print(f"\nReachable Set Strategy:")
+    print(f"  Bank Profile: Three-section (σ1={best['sigma1']:.2f}°, σ2={best['sigma2']:.2f}°)")
+    print(f"  Section 1 (0-35%): Constant σ1 = {best['sigma1']:.2f}°")
+    print(f"  Section 2 (35-50%): Linear transition to σ2")
+    print(f"  Section 3 (50-100%): Constant σ2 = {best['sigma2']:.2f}°")
+    
+    sigma_opt_mean = np.rad2deg(np.mean(U_sol))
+    sigma_opt_std = np.rad2deg(np.std(U_sol))
+    sigma_opt_max = np.rad2deg(np.max(U_sol))
+    sigma_opt_min = np.rad2deg(np.min(U_sol))
+    
+    print(f"\nOptimized Strategy:")
+    print(f"  Bank Angle Statistics:")
+    print(f"    Mean:   {sigma_opt_mean:>7.2f}°")
+    print(f"    Std:    {sigma_opt_std:>7.2f}°")
+    print(f"    Min:    {sigma_opt_min:>7.2f}°")
+    print(f"    Max:    {sigma_opt_max:>7.2f}°")
+    print(f"    Range:  [{sigma_opt_min:.2f}°, {sigma_opt_max:.2f}°]")
+    
+    print("\n" + "-"*80)
+    print("SUMMARY")
+    print("-"*80)
+    
+    # Key improvements
+    if h_diff_km > 0:
+        print(f"✓ Altitude IMPROVED by {h_diff_km:.3f} km ({h_diff_pct:+.2f}%)")
+    else:
+        print(f"✗ Altitude DECREASED by {abs(h_diff_km):.3f} km ({h_diff_pct:.2f}%)")
+    
+    if abs(mach_opt - 1.8) < abs(mach_reach - 1.8):  # 1.8 is center of [1.4, 2.2]
+        print(f"✓ Mach number MORE CENTERED in deployment envelope")
+    else:
+        print(f"○ Mach number less centered in deployment envelope")
+    
+    if abs(q_opt - 550) < abs(q_reach - 550):  # 550 is center of [300, 800]
+        print(f"✓ Dynamic pressure MORE CENTERED in deployment envelope")
+    else:
+        print(f"○ Dynamic pressure less centered in deployment envelope")
+    
+    if max_q_opt < max_q_reach:
+        print(f"✓ Peak dynamic pressure REDUCED by {abs(max_q_diff):.1f} Pa ({abs(max_q_diff_pct):.2f}%)")
+    elif max_q_opt > max_q_reach:
+        print(f"✗ Peak dynamic pressure INCREASED by {max_q_diff:.1f} Pa ({max_q_diff_pct:.2f}%)")
+    
+    if max_A_opt < max_A_reach:
+        print(f"✓ Peak acceleration REDUCED by {abs(max_A_diff):.3f} g ({abs(max_A_diff_pct):.2f}%)")
+    elif max_A_opt > max_A_reach:
+        print(f"✗ Peak acceleration INCREASED by {max_A_diff:.3f} g ({max_A_diff_pct:.2f}%)")
+    
+    if max_Qdot_opt < max_Qdot_reach:
+        print(f"✓ Peak heat rate REDUCED by {abs(max_Qdot_diff):.1f} W/m² ({abs(max_Qdot_diff_pct):.2f}%)")
+    elif max_Qdot_opt > max_Qdot_reach:
+        print(f"✗ Peak heat rate INCREASED by {max_Qdot_diff:.1f} W/m² ({max_Qdot_diff_pct:.2f}%)")
+    
+    print(f"\nPosition Miss: {dist_diff/1e3:.3f} km (lateral: {RC_diff/1e3:.3f} km)")
+    print(f"Time Difference: {abs(t_diff):.2f} s ({abs(t_diff_pct):.2f}%)")
+    
+    print("="*80 + "\n")
+
+    plot_optimized_trajectory(X_sol, U_sol, dt_sol)
+    print("\n✅ Integrated optimization complete.")
 
 if __name__ == "__main__":
     main()
+
+
+

@@ -146,7 +146,7 @@ def rk4_step(f, state, sigma, dt):
 
 # Collocation discretization parameters
 DT = 0.25           # [s] Integration timestep (not used directly, dt is optimized)
-N_SEGMENTS = 100   # Number of collocation segments
+N_SEGMENTS = 150   # Number of collocation segments
                    # More segments = higher fidelity but more decision variables
                    # 100 segments → 707 decision variables total
 
@@ -174,13 +174,18 @@ SIGMA_MAX = deg(81.0)      # [rad] Maximum bank angle (with 10% margin)
 SIGMA_DOT_MAX = deg(20.0)  # [rad/s] Maximum bank angle rate
 SIGMA_DOT_MIN = -deg(20.0) # [rad/s] Minimum bank angle rate
 SIGMA_DOT_DOT_MAX = deg(5.0)  # [rad/s²]
-SIGMA_DOT_DOT_MIN = -deg(-5.0)
+SIGMA_DOT_DOT_MIN = -deg(5.0)
                            # Limits how fast vehicle can roll
 
 # Objective function weights
 # Maximize altitude while minimizing gamma^2 for control authority
-W_ALTITUDE = 0.00001      # Weight for altitude maximization
-W_GAMMA = 1.0        # Weight for gamma^2 minimization (control authority)
+W_ALTITUDE = 1.0      # Weight for altitude maximization
+W_GAMMA = 5.0e6        # Weight for gamma^2 minimization (control authority)
+
+# Soft penalty weights for deployment criteria (guide without enforcing)
+W_MACH_PENALTY = 1.0e6     # Penalty for being outside Mach range
+W_Q_PENALTY = 1.0e2        # Penalty for being outside dynamic pressure range
+W_H_PENALTY = 1.0e5        # Penalty for being below minimum altitude
 
 # ============================================================
 # CASADI SYMBOLIC DYNAMICS
@@ -265,8 +270,10 @@ def solve_collocation(lat_target_in=None, lon_target_in=None):
     print("="*70)
     print(f"Collocation segments: {N_SEGMENTS}")
     print(f"Integration timestep: {DT} s")
-    print(f"Objective: Maximize altitude while minimizing gamma^2")
+    print(f"Objective: Maximize altitude with soft deployment penalties")
     print(f"Weights: W_altitude={W_ALTITUDE}, W_gamma={W_GAMMA}")
+    print(f"Soft penalties: Mach={W_MACH_PENALTY}, q={W_Q_PENALTY}, h={W_H_PENALTY}")
+    print(f"Target deployment: Mach [1.4-2.2], q [300-800 Pa], h >= 6 km")
     print("="*70)
     
     # Create CasADi optimization problem (Opti stack)
@@ -303,14 +310,53 @@ def solve_collocation(lat_target_in=None, lon_target_in=None):
     
     # ===== OBJECTIVE FUNCTION =====
     # Maximize altitude while minimizing gamma^2 for control authority
+    # Add soft penalties to guide deployment toward safe criteria
     # CasADi minimizes, so we use negative altitude
     h_final = r[-1] - mars.radius  # Altitude at final node [m]
     gam_final = gam[-1]             # Final flight path angle [rad]
     
-    # Weighted combination: maximize altitude, minimize gamma^2
+    # Compute deployment state for soft penalties
+    r_f = r[-1]
+    V_f = V[-1]
+    rho_f = mars.rho0 * ca.exp(-h_final / mars.Hs)
+    q_f = 0.5 * rho_f * V_f**2
+    
+    # Compute Mach number at deployment
+    h_km_f = h_final / 1e3
+    T_f = 1.4e-13 * h_km_f**3 - 8.85e-9 * h_km_f**2 - 1.245e-3 * h_km_f + 205.36
+    a_sound_f = ca.sqrt(mars.gamma_gas * mars.R_gas * ca.fmax(T_f, 1.0))
+    mach_f = V_f / ca.fmax(a_sound_f, 1e-6)
+    
+    # Define deployment criteria targets
+    MACH_MIN = 1.4
+    MACH_MAX = 2.2
+    MACH_TARGET = 0.5 * (MACH_MIN + MACH_MAX)  # 1.8
+    Q_MIN = 300.0
+    Q_MAX = 800.0
+    Q_TARGET = 0.5 * (Q_MIN + Q_MAX)  # 550 Pa
+    H_MIN = 6.0e3  # 6 km in meters
+    
+    # Soft penalties: quadratic penalties for violating deployment criteria
+    # These guide the optimizer without hard enforcement
+    
+    # Mach penalty: penalize being outside [MACH_MIN, MACH_MAX]
+    mach_penalty = ca.fmax(0, MACH_MIN - mach_f)**2 + ca.fmax(0, mach_f - MACH_MAX)**2
+    
+    # Dynamic pressure penalty: penalize being outside [Q_MIN, Q_MAX]
+    q_penalty = ca.fmax(0, Q_MIN - q_f)**2 + ca.fmax(0, q_f - Q_MAX)**2
+    
+    # Altitude penalty: penalize being below H_MIN
+    h_penalty = ca.fmax(0, H_MIN - h_final)**2
+    
+    # Weighted combination: maximize altitude, minimize gamma^2, add soft penalties
     # -h_final: maximize altitude (negative for minimization)
     # +W_GAMMA * gam_final^2: penalize steep flight path angles
-    objective = -W_ALTITUDE * h_final + W_GAMMA * gam_final**2
+    # +penalties: guide toward deployment criteria
+    objective = (-W_ALTITUDE * h_final + 
+                 W_GAMMA * gam_final**2 + 
+                 W_MACH_PENALTY * mach_penalty + 
+                 W_Q_PENALTY * q_penalty + 
+                 W_H_PENALTY * h_penalty)
     opti.minimize(objective)
     
     # ===== BOUNDARY CONDITIONS =====
@@ -378,36 +424,8 @@ def solve_collocation(lat_target_in=None, lon_target_in=None):
     opti.subject_to(opti.bounded(0.1, dt, 5.0))
     
     # ===== TERMINAL CONSTRAINTS =====
-    # Enforce deployment within safe envelope constraints
-    
-    # Define deployment constraints
-    MACH_MIN = 1.4    # Minimum Mach number for deployment
-    MACH_MAX = 2.2    # Maximum Mach number for deployment
-    Q_MIN = 300.0     # [Pa] Minimum dynamic pressure
-    Q_MAX = 800.0     # [Pa] Maximum dynamic pressure
-    H_MIN = 6.0e3     # [m] Minimum altitude for deployment (6 km)
-    
-    # Extract final state
-    r_f = r[-1]    # Final radius
-    V_f = V[-1]    # Final velocity
-    h_f = r_f - mars.radius  # Final altitude
-    
-    # Compute atmospheric properties at deployment
-    rho_f = mars.rho0 * ca.exp(-h_f / mars.Hs)  # Density
-    q_f = 0.5 * rho_f * V_f**2                   # Dynamic pressure [Pa]
-    
-    # Compute Mach number at deployment
-    # Need temperature first (polynomial fit to Mars atmosphere)
-    h_km_f = h_f / 1e3
-    T_f = 1.4e-13 * h_km_f**3 - 8.85e-9 * h_km_f**2 - 1.245e-3 * h_km_f + 205.36
-    a_sound_f = ca.sqrt(mars.gamma_gas * mars.R_gas * ca.fmax(T_f, 1.0))  # Speed of sound
-    mach_f = V_f / ca.fmax(a_sound_f, 1e-6)  # Mach number
-    
-    # DEPLOYMENT WINDOW CONSTRAINTS:
-    # Vehicle must deploy within safe Mach, q, and altitude envelope
-    opti.subject_to(opti.bounded(MACH_MIN, mach_f, MACH_MAX))  # 1.0 ≤ M ≤ 4.0
-    opti.subject_to(opti.bounded(Q_MIN, q_f, Q_MAX))           # 300 ≤ q ≤ 800 Pa
-    opti.subject_to(h_f >= H_MIN)                              # h ≥ 6 km
+    # No explicit deployment constraints - let optimizer maximize altitude
+    # Deployment will occur naturally when trajectory ends
     
     # ===== GENERATE INITIAL GUESS BY FORWARD SIMULATION =====
     # Good initial guess is CRITICAL for NLP convergence
@@ -632,6 +650,77 @@ def solve_collocation(lat_target_in=None, lon_target_in=None):
     print(f"Final q: {hist['q'][-1]:.1f} Pa")  # Dynamic pressure at deployment
     print(f"Trajectory duration: {t_sol[-1]:.1f} s")  # Total entry flight time
     print(f"Time step: {dt_sol:.3f} s")  # Optimal time step found by solver
+    
+    # ===== DEPLOYMENT ANALYSIS =====
+    print("\n" + "="*70)
+    print("DEPLOYMENT POINT ANALYSIS")
+    print("="*70)
+    print(f"Why did deployment occur at t = {t_sol[-1]:.1f} s?")
+    print(f"\nDeployment State:")
+    print(f"  Altitude:     {hist['h'][-1]:.2f} km")
+    print(f"  Velocity:     {hist['V'][-1]:.1f} m/s")
+    print(f"  Mach number:  {hist['mach'][-1]:.2f}")
+    print(f"  Dynamic pressure: {hist['q'][-1]:.1f} Pa")
+    print(f"  Flight path angle: {np.rad2deg(hist['gam'][-1]):.2f} deg")
+    print(f"  Heading angle: {np.rad2deg(hist['psi'][-1]):.2f} deg")
+    print(f"  Bank angle:   {np.rad2deg(hist['sigma'][-1]):.2f} deg")
+    
+    print(f"\nOptimization Objective at Deployment:")
+    obj_altitude_term = -W_ALTITUDE * hist['h'][-1] * 1e3  # Convert back to meters for objective
+    obj_gamma_term = W_GAMMA * hist['gam'][-1]**2
+    
+    # Compute penalty terms
+    MACH_MIN = 1.4
+    MACH_MAX = 2.2
+    Q_MIN = 300.0
+    Q_MAX = 800.0
+    H_MIN = 6.0
+    
+    mach_violation = max(0, MACH_MIN - hist['mach'][-1])**2 + max(0, hist['mach'][-1] - MACH_MAX)**2
+    q_violation = max(0, Q_MIN - hist['q'][-1])**2 + max(0, hist['q'][-1] - Q_MAX)**2
+    h_violation = max(0, H_MIN - hist['h'][-1])**2
+    
+    obj_mach_penalty = W_MACH_PENALTY * mach_violation
+    obj_q_penalty = W_Q_PENALTY * q_violation
+    obj_h_penalty = W_H_PENALTY * h_violation
+    
+    obj_total = obj_altitude_term + obj_gamma_term + obj_mach_penalty + obj_q_penalty + obj_h_penalty
+    
+    print(f"  Altitude term:    {obj_altitude_term:.2e} (weight={W_ALTITUDE})")
+    print(f"  Gamma^2 term:     {obj_gamma_term:.2e} (weight={W_GAMMA})")
+    print(f"  Mach penalty:     {obj_mach_penalty:.2e} (weight={W_MACH_PENALTY})")
+    print(f"  q penalty:        {obj_q_penalty:.2e} (weight={W_Q_PENALTY})")
+    print(f"  Altitude penalty: {obj_h_penalty:.2e} (weight={W_H_PENALTY})")
+    print(f"  Total objective:  {obj_total:.2e}")
+    
+    print(f"\nDeployment Reason:")
+    print(f"  The optimizer chose this point to maximize altitude")
+    print(f"  while maintaining a shallow flight path angle (gamma={np.rad2deg(hist['gam'][-1]):.2f}°)")
+    print(f"  for control authority. This represents the optimal")
+    print(f"  balance between the competing objectives.")
+    
+    # Check against typical deployment criteria (for reference only)
+    print(f"\nTypical Deployment Criteria (for reference):")
+    MACH_MIN = 1.4
+    MACH_MAX = 2.2
+    Q_MIN = 300.0
+    Q_MAX = 800.0
+    H_MIN = 6.0
+    
+    mach_ok = MACH_MIN <= hist['mach'][-1] <= MACH_MAX
+    q_ok = Q_MIN <= hist['q'][-1] <= Q_MAX
+    h_ok = hist['h'][-1] >= H_MIN
+    
+    print(f"  Mach: {hist['mach'][-1]:.2f} {'✓' if mach_ok else '✗'} [{MACH_MIN}-{MACH_MAX}]")
+    print(f"  Dynamic pressure: {hist['q'][-1]:.1f} Pa {'✓' if q_ok else '✗'} [{Q_MIN}-{Q_MAX}]")
+    print(f"  Altitude: {hist['h'][-1]:.2f} km {'✓' if h_ok else '✗'} [>={H_MIN}]")
+    
+    if mach_ok and q_ok and h_ok:
+        print(f"\n  ✓ Deployment point meets all typical safety criteria!")
+    else:
+        print(f"\n  Note: Deployment point doesn't meet typical criteria,")
+        print(f"        but this is expected since constraints were removed.")
+    print("="*70)
     
     return sol, hist, success
 
