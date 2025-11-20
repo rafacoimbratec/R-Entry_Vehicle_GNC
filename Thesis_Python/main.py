@@ -388,9 +388,9 @@ class ReentrySimulation:
             results['RC'][i] = RC
             results['Rgo'][i] = Rgo
             
-            deploy_cond = 1.4 <= state.V/a <= 2.2 and 300.0 <= results['q'][i] <= 800.0
+            deploy_cond = False #1.4 <= state.V/a <= 2.2 and 300.0 <= results['q'][i] <= 800.0
             # Check termination conditions
-            if deploy_cond or state.h < 6:
+            if deploy_cond or state.h <= 0:
                 # Trim arrays to actual simulation length
                 for key in results:
                     results[key] = results[key][:i+1]
@@ -685,23 +685,23 @@ def main():
     print(f"\nInitial Range-to-Go: {Rgo/1e3:.2f} km")
     
     # Create LNPCG guidance
-    guidance = LNPCGuidance(
-        sigma_f_deg=40.0,        # Final bank angle at terminal energy [deg]
-        e_f=mars.mu/(mars.radius+target.h) - 0.5*target.V**2,  # Terminal energy [J/kg]
-        activation_time=0.0,  # Activate guidance after 170 seconds
-        max_iter=25,            # Maximum Newton-Raphson iterations
-        epsilon=100.0,          # Convergence tolerance [m]
-        de=10000.0,             # Energy step for propagation [J/kg] 10 KJ/kg
-        dsigma_deg=3.0          # Bank angle step for finite difference [deg]
-    )
-    #guidance = constant_bank_guidance = ConstantBankGuidance(bank_angle_deg=0)
+    #guidance = LNPCGuidance(
+        #sigma_f_deg=40.0,        # Final bank angle at terminal energy [deg]
+        #e_f=mars.mu/(mars.radius+target.h) - 0.5*target.V**2,  # Terminal energy [J/kg]
+        #activation_time=0.0,  # Activate guidance after 170 seconds
+        #max_iter=25,            # Maximum Newton-Raphson iterations
+        #epsilon=100.0,          # Convergence tolerance [m]
+        #de=10000.0,             # Energy step for propagation [J/kg] 10 KJ/kg
+        #dsigma_deg=3.0          # Bank angle step for finite difference [deg]
+    #)
+    guidance = constant_bank_guidance = ConstantBankGuidance(bank_angle_deg=0)
     #print(f"\nUsing guidance: {guidance}")
     
     # Alternative: Use constant bank guidance
     # guidance = ConstantBankGuidance(bank_angle_deg=100.0)
     
     print("\nRunning simulation...")
-    results = sim.run(start_time=0.0, stop_time=7000.0, time_step=0.01, guidance=guidance, guidance_dt=1)
+    results = sim.run(start_time=0.0, stop_time=7000.0, time_step=0.01, guidance=guidance, guidance_dt=0.01)
     
     print(f"\nSimulation completed in {results['t'][-1]:.2f} seconds")
     print(f"Final altitude: {results['h'][-1]/1e3:.2f} km")
