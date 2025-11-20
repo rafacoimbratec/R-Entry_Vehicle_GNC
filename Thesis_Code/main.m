@@ -57,8 +57,25 @@ phi_t   = (0.276)*deg2rad;    % Target latitude [deg]
 %h_t     = 2480;     % Final altitude [m]
 %rt = (h_t+Mars_radius);
 %e_t = Mars_mu / rt - 0.5 * V_t^2;
-%% Targeting Accuracy Requirement
-%Rgo_target = 5e3;  % Maximum allowable targeting error [m] (5 km)
+%% Parachute deployment constraints
+% Targeting accuracy (within 5 km of target on the surface)
+Rgo_max = 5e3;        % [m] max allowed range-to-go at deploy
+
+% Mach window for safe deployment (placeholder values – tune as needed)
+M_min   = 1.5;        % [-] minimum Mach for chute deployment
+M_max   = 2.5;        % [-] maximum Mach for chute deployment
+
+% Dynamic pressure limit at deploy
+q_chute_min = 3e3;           % [Pa] example value, tune from parachute spec
+q_chute_max   = 8e3;        % [Pa] example value, tune from parachute spec
+
+% Minimum altitude (relative to MOLA) to allow deployment
+h_chute_min   = 6.0e3;      % [m] e.g. 0 km MOLA; increase if you want extra margin
+
+% Bank-angle sanity check (optional for supervisor later)
+sigma_max_allowed = 70*deg2rad;  % [rad] example max |sigma|
+sigma_max_rate = 20; %deg/s
+sigma_max_rate_accel = 5; %deg/s^2
 
 %% Entry Vehicle Aerodynamic Properties
 mass = 2804; % Mass [kg]
@@ -69,9 +86,9 @@ L_over_D = 0.2483;   % Lift-to-drag ratio, dimensionless
 beta      = mass/(S_ref*Cd);   % Ballistic coefficient [kg/m^2]
 
 %% Path Constraints and Requirements
-A_max  = 15;  % Maximum allowable acceleration [m/s^2] (4g)
-q_max  = 13e3;         % Maximum allowable dynamic pressure [Pa] (13 kPa)
-Qdot_max = 500e3;      % Maximum allowable heat rate [W/m^2] (500 kW/m^2)
+A_path_max  = 15;  % Maximum allowable acceleration [m/s^2] (4g)
+q_path_max  = 13e3;         % Maximum allowable dynamic pressure [Pa] (13 kPa)
+Qdot_path_max = 500e3;      % Maximum allowable heat rate [W/m^2] (500 kW/m^2)
 
 %% Compute Initial Range-to-Go
 
