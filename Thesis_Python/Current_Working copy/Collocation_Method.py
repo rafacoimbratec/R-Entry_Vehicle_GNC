@@ -38,8 +38,8 @@ class Mars:
 
 @dataclass
 class Vehicle:
-    beta: float = 135.0                 # ballistic coefficient [kg/m^2]
-    L_over_D: float = 0.24              # lift-to-drag
+    beta: float = 121.6                 # ballistic coefficient [kg/m^2]
+    L_over_D: float = 0.2483              # lift-to-drag
 
 mars = Mars()
 veh  = Vehicle()
@@ -183,7 +183,7 @@ W_ALTITUDE = 1.0      # Weight for altitude maximization
 W_GAMMA = 5.0e6        # Weight for gamma^2 minimization (control authority)
 
 # Soft penalty weights for deployment criteria (guide without enforcing)
-W_MACH_PENALTY = 1.0e6     # Penalty for being outside Mach range
+W_MACH_PENALTY = 1.0e7     # Penalty for being outside Mach range
 W_Q_PENALTY = 1.0e2        # Penalty for being outside dynamic pressure range
 W_H_PENALTY = 1.0e5        # Penalty for being below minimum altitude
 
@@ -328,9 +328,9 @@ def solve_collocation(lat_target_in=None, lon_target_in=None):
     mach_f = V_f / ca.fmax(a_sound_f, 1e-6)
     
     # Define deployment criteria targets
-    MACH_MIN = 1.4
-    MACH_MAX = 2.2
-    MACH_TARGET = 0.5 * (MACH_MIN + MACH_MAX)  # 1.8
+    MACH_MIN = 1.5
+    MACH_MAX = 2.5
+    MACH_TARGET = 0.5 * (MACH_MIN + MACH_MAX)  # 2.0
     Q_MIN = 300.0
     Q_MAX = 800.0
     Q_TARGET = 0.5 * (Q_MIN + Q_MAX)  # 550 Pa
@@ -701,8 +701,8 @@ def solve_collocation(lat_target_in=None, lon_target_in=None):
     
     # Check against typical deployment criteria (for reference only)
     print(f"\nTypical Deployment Criteria (for reference):")
-    MACH_MIN = 1.4
-    MACH_MAX = 2.2
+    MACH_MIN = 1.5
+    MACH_MAX = 2.5
     Q_MIN = 300.0
     Q_MAX = 800.0
     H_MIN = 6.0

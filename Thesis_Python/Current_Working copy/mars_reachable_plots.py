@@ -112,9 +112,9 @@ def rk4_step(f, state, sigma, dt):
 def bank_profile_three_section(t, t_total, sigma1, sigma2):
     """
     Three-section bank angle profile:
-    - Section 1 (0% to 35%): constant sigma1
-    - Section 2 (35% to 50%): linear transition from sigma1 to 0
-    - Section 3 (50% to 100%): constant sigma2
+    - Section 1 (0% to 75% of t_total): constant bank angle sigma1
+    - Section 2 (75% to 77% of t_total): linear transition from sigma1 to sigma2
+    - Section 3 (77% to 100% of t_total): constant bank angle sigma2
     
     Args:
         t: current time [s]
@@ -125,15 +125,16 @@ def bank_profile_three_section(t, t_total, sigma1, sigma2):
     Returns:
         bank angle [rad]
     """
-    t1 = 0.35 * t_total  # End of section 1 (35%)
-    t2 = 0.50 * t_total  # End of section 2 (50%)
+    t1 = 0.75 * t_total  # End of section 1 (35%)
+    t2 = 0.77 * t_total  # End of section 2 (50%)
     
     if t < t1:
         # Section 1: constant sigma1
         return sigma1
     elif t < t2:
-        # Section 2: linear transition from sigma1 to 0
-        return sigma1 * (t2 - t) / (t2 - t1)
+        # Section 2: linear transition from sigma1 to sigma2
+        alpha = (t - t1) / (t2 - t1)  # interpolation factor [0, 1]
+        return sigma1 + alpha * (sigma2 - sigma1)
     else:
         # Section 3: constant sigma2
         return sigma2
@@ -280,8 +281,8 @@ def build_reachable_set(lat0, lon0,
         tmax: maximum simulation time [s]
 
     Returns:
-        all_samples : array of shape (N, 8) with columns
-                      [lat_f_deg, lon_f_deg, ALT_km, max_q, max_A, max_Qdot, sigma1_deg, sigma2_deg]
+        all_samples : array of shape (N, 9) with columns
+                      [lat_f_deg, lon_f_deg, ALT_km, max_q, max_A, max_Qdot, sigma1_deg, sigma2_deg, gam_f_deg]
     """
     all_samples = []
 
@@ -306,20 +307,21 @@ def build_reachable_set(lat0, lon0,
             lat_f_deg = np.degrees(ph)
             lon_f_deg = np.degrees(th)
             ALT_km = h / 1000.0
+            gam_f_deg = np.degrees(gam)
             sigma1_deg = np.degrees(sigma1)
             sigma2_deg = np.degrees(sigma2)
 
-            record = [lat_f_deg, lon_f_deg, ALT_km, max_q, max_A, max_Qdot, sigma1_deg, sigma2_deg]
+            record = [lat_f_deg, lon_f_deg, ALT_km, max_q, max_A, max_Qdot, sigma1_deg, sigma2_deg, gam_f_deg]
             all_samples.append(record)
             
             status = "VIOLATED" if violated else "OK"
             print(
                 f"[{status:8s}] σ1={sigma1_deg:6.2f}°, σ2={sigma2_deg:6.2f}° | "
-                f"lat={lat_f_deg:7.2f}°, lon={lon_f_deg:7.2f}°, ALT={ALT_km:6.2f} km | "
+                f"lat={lat_f_deg:7.2f}°, lon={lon_f_deg:7.2f}°, ALT={ALT_km:6.2f} km, γ_f={gam_f_deg:6.2f}° | "
                 f"max_q={max_q:8.1f} Pa, max_A={max_A:5.2f} g, max_Qdot={max_Qdot:8.1f} W/m^2"
             )
 
-    all_samples = np.array(all_samples) if len(all_samples) > 0 else np.empty((0, 8))
+    all_samples = np.array(all_samples) if len(all_samples) > 0 else np.empty((0, 9))
 
     return all_samples
 
@@ -359,6 +361,7 @@ if __name__ == "__main__":
         q_all    = all_samples[:, 3]  # max dynamic pressure [Pa]
         A_all    = all_samples[:, 4]  # max acceleration [g]
         Qdot_all = all_samples[:, 5]  # max heat rate [W/m^2]
+        gam_f_all = all_samples[:, 8]  # final flight path angle [deg]
 
         # Compute downrange and crossrange for each sample
         # Use a reference target slightly ahead of entry point for proper coordinate frame
@@ -384,7 +387,7 @@ if __name__ == "__main__":
         fig1, axes1 = plt.subplots(2, 2, figsize=(14, 10))
 
         # 1) Altitude contour on lat/lon
-        levels_alt = 12
+        levels_alt = 6
         cf0 = axes1[0,0].tricontourf(lon_all, lat_all, ALT_all, levels=levels_alt, cmap='viridis')
         cs0 = axes1[0,0].tricontour(lon_all, lat_all, ALT_all, levels=levels_alt, colors='k', linewidths=0.6)
         axes1[0,0].clabel(cs0, fmt="%.1f", fontsize=8)
@@ -395,7 +398,7 @@ if __name__ == "__main__":
         axes1[0,0].grid(True, alpha=0.3)
 
         # 2) Maximum dynamic pressure on lat/lon
-        levels_q = 12
+        levels_q = 6
         q_kPa = q_all / 1e3  # convert Pa to kPa
         cf1 = axes1[0,1].tricontourf(lon_all, lat_all, q_kPa, levels=levels_q, cmap='plasma')
         cs1 = axes1[0,1].tricontour(lon_all, lat_all, q_kPa, levels=levels_q, colors='k', linewidths=0.6)
@@ -410,7 +413,7 @@ if __name__ == "__main__":
         axes1[0,1].grid(True, alpha=0.3)
 
         # 3) Maximum acceleration on lat/lon
-        levels_a = 12
+        levels_a = 6
         cf2 = axes1[1,0].tricontourf(lon_all, lat_all, A_all, levels=levels_a, cmap='hot')
         cs2 = axes1[1,0].tricontour(lon_all, lat_all, A_all, levels=levels_a, colors='k', linewidths=0.6)
         axes1[1,0].clabel(cs2, fmt="%.2f", fontsize=8)
@@ -424,7 +427,7 @@ if __name__ == "__main__":
         axes1[1,0].grid(True, alpha=0.3)
 
         # 4) Maximum heat rate on lat/lon
-        levels_qd = 12
+        levels_qd = 6
         Qdot_kW = Qdot_all / 1e3  # convert W/m^2 to kW/m^2
         cf3 = axes1[1,1].tricontourf(lon_all, lat_all, Qdot_kW, levels=levels_qd, cmap='inferno')
         cs3 = axes1[1,1].tricontour(lon_all, lat_all, Qdot_kW, levels=levels_qd, colors='k', linewidths=0.6)
@@ -505,8 +508,8 @@ if __name__ == "__main__":
         
         # Apply constraints to filter valid targets
         valid_mask = (
-            (np.abs(RC_all) < 10.0) &          # Crossrange < 5 km
-            (A_all < 15.0) &                    # Acceleration < 5 g
+            (np.abs(RC_all) < 10.0) &          # Crossrange < 10 km
+            (A_all < 15.0) &                    # Acceleration < 15 g
             (q_all <= constraints.q_max) &     # Dynamic pressure within limit
             (Qdot_all <= constraints.Qdot_max) # Heat rate within limit
         )
@@ -524,11 +527,38 @@ if __name__ == "__main__":
             q_valid = q_all[valid_mask]
             A_valid = A_all[valid_mask]
             Qdot_valid = Qdot_all[valid_mask]
+            gam_f_valid = gam_f_all[valid_mask]
             sigma1_valid = all_samples[valid_mask, 6]
             sigma2_valid = all_samples[valid_mask, 7]
             
-            # Cost function: maximize altitude (minimize negative altitude)
-            cost = -ALT_valid  # Higher altitude = lower cost
+            # Multi-objective cost function with normalized weights
+            # Normalize each objective to [0, 1] range
+            ALT_norm = (ALT_valid - ALT_valid.min()) / (ALT_valid.max() - ALT_valid.min() + 1e-9)
+            A_norm = (A_valid - A_valid.min()) / (A_valid.max() - A_valid.min() + 1e-9)
+            Qdot_norm = (Qdot_valid - Qdot_valid.min()) / (Qdot_valid.max() - Qdot_valid.min() + 1e-9)
+            RC_norm = (np.abs(RC_valid) - np.abs(RC_valid).min()) / (np.abs(RC_valid).max() - np.abs(RC_valid).min() + 1e-9)
+            gam_norm = (np.abs(gam_f_valid) - np.abs(gam_f_valid).min()) / (np.abs(gam_f_valid).max() - np.abs(gam_f_valid).min() + 1e-9)
+            
+            # Weighted cost (minimize):
+            # - Maximize altitude (minimize -ALT)
+            # - Minimize g-load
+            # - Minimize heat load
+            # - Minimize crossrange
+            # - Minimize flight path angle magnitude
+            w_alt = 0.4      # Weight for altitude (higher is better)
+            w_A = 0.05       # Weight for acceleration (lower is better)
+            w_Qdot = 0.1     # Weight for heat rate (lower is better)
+            w_RC = 0.15      # Weight for crossrange (lower is better)
+            w_gam = 0.3      # Weight for flight path angle (lower is better)
+            
+            cost = -w_alt * ALT_norm + w_A * A_norm + w_Qdot * Qdot_norm + w_RC * RC_norm + w_gam * gam_norm
+            
+            print(f"\nCost function weights:")
+            print(f"  Altitude:           {w_alt:.2f} (maximize)")
+            print(f"  Acceleration:       {w_A:.2f} (minimize)")
+            print(f"  Heat Rate:          {w_Qdot:.2f} (minimize)")
+            print(f"  Crossrange:         {w_RC:.2f} (minimize)")
+            print(f"  Flight Path Angle:  {w_gam:.2f} (minimize)")
             
             # Find best target
             best_idx = np.argmin(cost)
@@ -541,18 +571,21 @@ if __name__ == "__main__":
             q_target = q_valid[best_idx]
             A_target = A_valid[best_idx]
             Qdot_target = Qdot_valid[best_idx]
+            gam_f_target = gam_f_valid[best_idx]
             sigma1_best = sigma1_valid[best_idx]
             sigma2_best = sigma2_valid[best_idx]
+            cost_target = cost[best_idx]
             
-            print(f"\nBest target selected:")
-            print(f"  Latitude:     {lat_target:7.3f}°")
-            print(f"  Longitude:    {lon_target:7.3f}°")
-            print(f"  Downrange:    {RD_target:7.2f} km")
-            print(f"  Crossrange:   {RC_target:7.2f} km")
-            print(f"  Altitude:     {ALT_target:7.2f} km")
-            print(f"  Max q:        {q_target:8.1f} Pa")
-            print(f"  Max A:        {A_target:5.2f} g")
-            print(f"  Max Qdot:     {Qdot_target:8.1f} W/m²")
+            print(f"\nBest target selected (cost = {cost_target:.4f}):")
+            print(f"  Latitude:          {lat_target:7.3f}°")
+            print(f"  Longitude:         {lon_target:7.3f}°")
+            print(f"  Downrange:         {RD_target:7.2f} km")
+            print(f"  Crossrange:        {RC_target:7.2f} km")
+            print(f"  Altitude:          {ALT_target:7.2f} km")
+            print(f"  Flight Path Angle: {gam_f_target:7.2f}°")
+            print(f"  Max q:             {q_target:8.1f} Pa")
+            print(f"  Max A:             {A_target:5.2f} g")
+            print(f"  Max Qdot:          {Qdot_target:8.1f} W/m²")
             print(f"  Control: σ1={sigma1_best:6.2f}°, σ2={sigma2_best:6.2f}°")
             
             # ============================================================

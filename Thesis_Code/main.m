@@ -51,8 +51,8 @@ gamma0 = (-12)*deg2rad;        % Initial flight path angle [deg]
 psi0   = (-2.8758)*deg2rad;    % Initial heading angle [deg]
 
 %% Final Conditions Mars reachable plots
-theta_t = (-176.269)*deg2rad;   % Target longitude [deg]
-phi_t   = (-5.994)*deg2rad;    % Target latitude [deg]
+theta_t = (-176.321)*deg2rad;   % Target longitude [deg]
+phi_t   = (-4.856)*deg2rad;    % Target latitude [deg]
 %V_t     = 450;      % Final velocity [m/s]
 %h_t     = 2480;     % Final altitude [m]
 %rt = (h_t+Mars_radius);
@@ -73,7 +73,7 @@ q_chute_max   = 8e2;        % [Pa] example value, tune from parachute spec
 h_chute_min   = 6e3;      % [m] e.g. 0 km MOLA; increase if you want extra margin
 
 % Bank-angle sanity check (optional for supervisor later)
-sigma_max_allowed = 70*deg2rad;  % [rad] example max |sigma|
+sigma_max_allowed = 81*deg2rad;  % [rad] example max |sigma| 90º deegres with 10% margin to avoid saturation
 sigma_max_rate = 20; %deg/s
 sigma_max_rate_accel = 5; %deg/s^2
 
