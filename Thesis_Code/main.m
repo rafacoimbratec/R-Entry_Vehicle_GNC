@@ -14,7 +14,7 @@ Mars_omega = 7.088e-5;         % rad/s (sidereal rotation period ~24h 37m)
 
 % === Mars Atmospheric Parameters ===
 H_s = 11100;   % Scale height of Mars' atmosphere [m]
-rho_0 = 0.0158; % Reference density of Mars' atmosphere at surface [kg/m^3]
+rho_0 = 0.020; % Reference density of Mars' atmosphere at surface [kg/m^3]
 
 % Constants
 alpha1 = 559.35;
@@ -46,13 +46,13 @@ h0  = 125e3;        % Initial altitude [m]
 r0 = (h0+Mars_radius);
 theta0 = -176.40167*deg2rad; % Initial longitude [deg]
 phi0   = (-21.3)*deg2rad;      % Initial latitude [deg]
-V0  = 5500;          % Initial velocity [m/s]
+V0  = 5000;          % Initial velocity [m/s]
 gamma0 = (-12)*deg2rad;        % Initial flight path angle [deg]
 psi0   = (-2.8758)*deg2rad;    % Initial heading angle [deg]
 
-%% Final Conditions
-theta_t = (-175.8)*deg2rad;   % Target longitude [deg]
-phi_t   = (0.276)*deg2rad;    % Target latitude [deg]
+%% Final Conditions Mars reachable plots
+theta_t = (-176.269)*deg2rad;   % Target longitude [deg]
+phi_t   = (-5.994)*deg2rad;    % Target latitude [deg]
 %V_t     = 450;      % Final velocity [m/s]
 %h_t     = 2480;     % Final altitude [m]
 %rt = (h_t+Mars_radius);
@@ -66,11 +66,11 @@ M_min   = 1.5;        % [-] minimum Mach for chute deployment
 M_max   = 2.5;        % [-] maximum Mach for chute deployment
 
 % Dynamic pressure limit at deploy
-q_chute_min = 3e3;           % [Pa] example value, tune from parachute spec
-q_chute_max   = 8e3;        % [Pa] example value, tune from parachute spec
+q_chute_min = 3e2;           % [Pa] example value, tune from parachute spec
+q_chute_max   = 8e2;        % [Pa] example value, tune from parachute spec
 
 % Minimum altitude (relative to MOLA) to allow deployment
-h_chute_min   = 6.0e3;      % [m] e.g. 0 km MOLA; increase if you want extra margin
+h_chute_min   = 6e3;      % [m] e.g. 0 km MOLA; increase if you want extra margin
 
 % Bank-angle sanity check (optional for supervisor later)
 sigma_max_allowed = 70*deg2rad;  % [rad] example max |sigma|

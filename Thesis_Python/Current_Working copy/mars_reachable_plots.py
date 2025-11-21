@@ -41,11 +41,11 @@ class MarsEnv:
 
 
 class Vehicle:
-    L_over_D = 0.24
-    beta = 135.0            # ballistic coefficient as used in your eom
+    L_over_D = 0.2483
+    beta = 121.6            # ballistic coefficient as used in your eom
     N = 0.5                 # Sutton-Graves exponent on density
     M = 3.0                 # Sutton-Graves exponent on velocity
-    k_heat_flux = 5.3697e-5 # Sutton-Graves coefficient
+    k_heat_flux = 2.336276498787735e-4 # Sutton-Graves coefficient
 
 
 @dataclass
@@ -53,7 +53,7 @@ class PathConstraints:
     """Path constraints for the reentry vehicle (g-load, dynamic pressure, heat rate)."""
     A_max: float = 15.0        # [g] maximum total acceleration
     q_max: float = 13e3       # [Pa] maximum dynamic pressure
-    Qdot_max: float = 500e3   # [W/m^2] maximum heat rate
+    Qdot_max: float = 600e3   # [W/m^2] maximum heat rate
 
 
 mars = MarsEnv()
