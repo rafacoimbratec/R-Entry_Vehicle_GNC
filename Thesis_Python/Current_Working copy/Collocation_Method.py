@@ -155,7 +155,7 @@ deg = np.deg2rad   # Convenience function for degree to radian conversion
 h0   = 125e3       # [m] Entry altitude (125 km)
 r0   = mars.radius + h0  # [m] Entry radius from Mars center
 V0   = 5000.0      # [m/s] Entry velocity
-gam0 = deg(-12.0)  # [rad] Entry flight path angle (negative = descending)
+gam0 = deg(-15.0)  # [rad] Entry flight path angle (negative = descending)
 psi0 = deg(-2.8758) # [rad] Entry heading angle
 lat0 = deg(-21.5)  # [rad] Entry latitude
 lon0 = deg(-176.40167)   # [rad] Entry longitude
