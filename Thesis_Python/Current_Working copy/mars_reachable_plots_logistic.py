@@ -51,9 +51,9 @@ class Vehicle:
 @dataclass
 class PathConstraints:
     """Path constraints for the reentry vehicle (g-load, dynamic pressure, heat rate)."""
-    A_max: float = 15.0        # [g] maximum total acceleration
+    A_max: float = 6.0        # [g] maximum total acceleration
     q_max: float = 13e3       # [Pa] maximum dynamic pressure
-    Qdot_max: float = 600e3   # [W/m^2] maximum heat rate
+    Qdot_max: float = 500e3   # [W/m^2] maximum heat rate
 
 
 mars = MarsEnv()
@@ -107,37 +107,46 @@ def rk4_step(f, state, sigma, dt):
     return state + (dt/6.0)*(k1 + 2*k2 + 2*k3 + k4)
 
 # ============================================================
-# Three-section bank profile parameterization
+# Energy calculation
 # ============================================================
-def bank_profile_three_section(t, t_total, sigma1, sigma2):
+def compute_energy(r, V):
     """
-    Three-section bank angle profile:
-    - Section 1 (0% to 75% of t_total): constant bank angle sigma1
-    - Section 2 (75% to 77% of t_total): linear transition from sigma1 to sigma2
-    - Section 3 (77% to 100% of t_total): constant bank angle sigma2
+    Compute specific mechanical energy [J/kg]
+    E = -mu/r - 0.5*V^2
+    """
+    return -mars.mu / r - 0.5 * V**2
+
+# ============================================================
+# Logistic energy-based bank angle parameterization
+# ============================================================
+def sigma_logistic_ref(E, E0, Ef, sigma0, K, sigma_max):
+    """
+    Logistic energy-based bank angle parameterisation with saturation.
     
     Args:
-        t: current time [s]
-        t_total: total trajectory duration [s]
-        sigma1: bank angle for first section [rad], in range [-81°, +81°]
-        sigma2: bank angle for third section [rad], in range [-81°, +81°]
+        E: current specific mechanical energy [J/kg]
+        E0: energy at entry interface [J/kg]
+        Ef: reference final energy (near deploy) [J/kg]
+        sigma0: initial bank angle level at E0 [rad]
+        K: decay rate (larger K -> faster reduction of |sigma|)
+        sigma_max: max allowed |sigma| for saturation [rad]
     
     Returns:
-        bank angle [rad]
+        sigma_ref: commanded bank angle [rad]
     """
-    t1 = 0.75 * t_total  # End of section 1 (35%)
-    t2 = 0.77 * t_total  # End of section 2 (50%)
-    
-    if t < t1:
-        # Section 1: constant sigma1
-        return sigma1
-    elif t < t2:
-        # Section 2: linear transition from sigma1 to sigma2
-        alpha = (t - t1) / (t2 - t1)  # interpolation factor [0, 1]
-        return sigma1 + alpha * (sigma2 - sigma1)
+    # Protect against division by zero
+    if abs(Ef - E0) < 1e-6:
+        sigma_cmd = sigma0
     else:
-        # Section 3: constant sigma2
-        return sigma2
+        # Normalised energy
+        z = (E - E0) / (Ef - E0)
+        # Logistic law (Lee-style)
+        sigma_cmd = 2 * sigma0 / (1 + np.exp(K * z))
+    
+    # Symmetric saturation
+    sigma_ref = np.clip(sigma_cmd, -sigma_max, sigma_max)
+    
+    return sigma_ref
 
 # ============================================================
 # Loads and deploy trigger (Mach/q rule)
@@ -185,23 +194,20 @@ def deploy_trigger(h, V, q):
     a_safe = max(a, 1e-6)
     mach = V / a_safe
 
-    return ((1.5 <= mach <= 2.5) and (300.0 <= q <= 800.0) or (h <= 6000.0))
+    return ((1.4 <= mach <= 2.2) and (300.0 <= q <= 800.0) or (h <= 6000.0))
 
 # ============================================================
-# Safe simulation with path constraints
+# Safe simulation with logistic bank profile
 # ============================================================
 def simulate_entry_safe(initial_state,
                         dt=0.25,
                         tmax=2000.0,
-                        sigma1=np.deg2rad(75.0),
-                        sigma2=np.deg2rad(-75.0),
+                        sigma0=np.deg2rad(75.0),
+                        K=1.0,
+                        sigma_max=np.deg2rad(120.0),
                         constraints=constraints):
     """
-    Integrate one trajectory using three-section bank profile.
-    
-    Uses two-pass approach:
-    1. First pass: estimate actual trajectory duration
-    2. Second pass: re-simulate with bank profile normalized to actual duration
+    Integrate one trajectory using logistic energy-based bank profile.
 
     Returns:
         state_f      : final state at stop time
@@ -211,23 +217,16 @@ def simulate_entry_safe(initial_state,
         max_A        : maximum total acceleration along the path [g]
         max_Qdot     : maximum heat rate along the path [W/m^2]
     """
-    # First pass: estimate trajectory duration using tmax as duration guess
-    state = initial_state.copy()
-    t = 0.0
-
-    while t < tmax:
-        sigma = bank_profile_three_section(t, tmax, sigma1, sigma2)
-        state = rk4_step(eom, state, sigma, dt)
-        h, rho, q, A_total, Qdot = compute_loads(state)
-        r, th, ph, V, gam, psi = state
-        
-        if deploy_trigger(h, V, q):
-            break
-        t += dt
+    # Compute initial and final energies
+    r0, th0, ph0, V0, gam0, psi0 = initial_state
+    E0 = compute_energy(r0, V0)
     
-    t_actual = t  # Actual trajectory duration
+    # Final energy: altitude = 6 km, velocity = 475 m/s
+    h_final = 6000.0  # [m]
+    V_final = 475.0   # [m/s]
+    r_final = mars.radius + h_final
+    Ef = compute_energy(r_final, V_final)
     
-    # Second pass: re-simulate with bank profile normalized to actual duration
     state = initial_state.copy()
     t = 0.0
 
@@ -236,8 +235,15 @@ def simulate_entry_safe(initial_state,
     max_Qdot = 0.0
     violated = False
 
-    while t < tmax:  # Slightly beyond to ensure we reach deployment
-        sigma = bank_profile_three_section(t, t_actual, sigma1, sigma2)
+    while t < tmax:
+        # Compute current energy
+        r, th, ph, V, gam, psi = state
+        E = compute_energy(r, V)
+        
+        # Compute bank angle using logistic law
+        sigma = sigma_logistic_ref(E, E0, Ef, sigma0, K, sigma_max)
+        
+        # Integrate
         state = rk4_step(eom, state, sigma, dt)
 
         # Compute loads
@@ -267,22 +273,24 @@ def simulate_entry_safe(initial_state,
 # Build reachable set by sweeping control parameters
 # ============================================================
 def build_reachable_set(lat0, lon0,
-                        sigma1_grid, sigma2_grid,
+                        sigma0_grid, K_grid,
                         dt=0.25,
-                        tmax=4000.0):
+                        tmax=4000.0,
+                        sigma_max=np.deg2rad(120.0)):
     """
-    Build a reachable set by sweeping control parameters (sigma1, sigma2).
+    Build a reachable set by sweeping control parameters (sigma0, K).
 
     Args:
         lat0, lon0: entry point latitude and longitude [rad]
-        sigma1_grid: array of sigma1 values to sweep [rad]
-        sigma2_grid: array of sigma2 values to sweep [rad]
+        sigma0_grid: array of sigma0 values to sweep [rad]
+        K_grid: array of K values to sweep (decay rate)
         dt: integration timestep [s]
         tmax: maximum simulation time [s]
+        sigma_max: maximum bank angle saturation [rad]
 
     Returns:
         all_samples : array of shape (N, 9) with columns
-                      [lat_f_deg, lon_f_deg, ALT_km, max_q, max_A, max_Qdot, sigma1_deg, sigma2_deg, gam_f_deg]
+                      [lat_f_deg, lon_f_deg, ALT_km, max_q, max_A, max_Qdot, sigma0_deg, K, gam_f_deg]
     """
     all_samples = []
 
@@ -295,10 +303,10 @@ def build_reachable_set(lat0, lon0,
 
     state0 = np.array([r0, lon0, lat0, V0, gam0, psi0])
 
-    for sigma1 in sigma1_grid:
-        for sigma2 in sigma2_grid:
+    for sigma0 in sigma0_grid:
+        for K in K_grid:
             state_f, tf, violated, max_q, max_A, max_Qdot = simulate_entry_safe(
-                state0, dt=dt, tmax=tmax, sigma1=sigma1, sigma2=sigma2
+                state0, dt=dt, tmax=tmax, sigma0=sigma0, K=K, sigma_max=sigma_max
             )
 
             r, th, ph, V, gam, psi = state_f
@@ -308,15 +316,14 @@ def build_reachable_set(lat0, lon0,
             lon_f_deg = np.degrees(th)
             ALT_km = h / 1000.0
             gam_f_deg = np.degrees(gam)
-            sigma1_deg = np.degrees(sigma1)
-            sigma2_deg = np.degrees(sigma2)
+            sigma0_deg = np.degrees(sigma0)
 
-            record = [lat_f_deg, lon_f_deg, ALT_km, max_q, max_A, max_Qdot, sigma1_deg, sigma2_deg, gam_f_deg]
+            record = [lat_f_deg, lon_f_deg, ALT_km, max_q, max_A, max_Qdot, sigma0_deg, K, gam_f_deg]
             all_samples.append(record)
             
             status = "VIOLATED" if violated else "OK"
             print(
-                f"[{status:8s}] σ1={sigma1_deg:6.2f}°, σ2={sigma2_deg:6.2f}° | "
+                f"[{status:8s}] σ0={sigma0_deg:6.2f}°, K={K:5.2f} | "
                 f"lat={lat_f_deg:7.2f}°, lon={lon_f_deg:7.2f}°, ALT={ALT_km:6.2f} km, γ_f={gam_f_deg:6.2f}° | "
                 f"max_q={max_q:8.1f} Pa, max_A={max_A:5.2f} g, max_Qdot={max_Qdot:8.1f} W/m^2"
             )
@@ -333,21 +340,21 @@ if __name__ == "__main__":
     lat0 = -21.3 * deg2rad
     lon0 = -176.40167 * deg2rad
 
-    # Sweep control parameters: sigma1 and sigma2 in range [-81°, +81°]
+    # Sweep control parameters: sigma0 in range [-120°, +120°] and K in [0.1, 2.0]
     # Coarse mesh for speed (10x10 = 100 simulations)
-    sigma1_grid = np.linspace(np.deg2rad(-81), np.deg2rad(81), 10)
-    sigma2_grid = np.linspace(np.deg2rad(-81), np.deg2rad(81), 10)
+    sigma0_grid = np.linspace(np.deg2rad(-120), np.deg2rad(120), 10)
+    K_grid = np.linspace(0.1, 2.0, 10)
 
-    print(f"Building reachable set with {len(sigma1_grid)} x {len(sigma2_grid)} = {len(sigma1_grid)*len(sigma2_grid)} control parameter combinations")
-    print(f"sigma1 range: [{np.degrees(sigma1_grid[0]):.1f}°, {np.degrees(sigma1_grid[-1]):.1f}°]")
-    print(f"sigma2 range: [{np.degrees(sigma2_grid[0]):.1f}°, {np.degrees(sigma2_grid[-1]):.1f}°]")
+    print(f"Building reachable set with {len(sigma0_grid)} x {len(K_grid)} = {len(sigma0_grid)*len(K_grid)} control parameter combinations")
+    print(f"sigma0 range: [{np.degrees(sigma0_grid[0]):.1f}°, {np.degrees(sigma0_grid[-1]):.1f}°]")
+    print(f"K range: [{K_grid[0]:.2f}, {K_grid[-1]:.2f}]")
     print("="*80)
 
     # ------------------------------------------------------------
     # Build reachable set
     # ------------------------------------------------------------
     all_samples = build_reachable_set(
-        lat0, lon0, sigma1_grid, sigma2_grid,
+        lat0, lon0, sigma0_grid, K_grid,
         dt=0.25, tmax=4000.0
     )
 
@@ -441,7 +448,7 @@ if __name__ == "__main__":
         axes1[1,1].set_title('Maximum Heat Rate')
         axes1[1,1].grid(True, alpha=0.3)
 
-        plt.suptitle('Reachable Set: Lat/Lon Footprint', fontsize=14, y=0.995)
+        plt.suptitle('Reachable Set (Logistic): Lat/Lon Footprint', fontsize=14, y=0.995)
         plt.tight_layout()
 
         # ===== FIGURE 2: DOWNRANGE/CROSSRANGE FOOTPRINT =====
@@ -496,7 +503,7 @@ if __name__ == "__main__":
         axes2[1,1].set_title('Maximum Heat Rate')
         axes2[1,1].grid(True, alpha=0.3)
 
-        plt.suptitle('Reachable Set: Downrange/Crossrange Footprint', fontsize=14, y=0.995)
+        plt.suptitle('Reachable Set (Logistic): Downrange/Crossrange Footprint', fontsize=14, y=0.995)
         plt.tight_layout()
 
         # ============================================================
@@ -528,8 +535,8 @@ if __name__ == "__main__":
             A_valid = A_all[valid_mask]
             Qdot_valid = Qdot_all[valid_mask]
             gam_f_valid = gam_f_all[valid_mask]
-            sigma1_valid = all_samples[valid_mask, 6]
-            sigma2_valid = all_samples[valid_mask, 7]
+            sigma0_valid = all_samples[valid_mask, 6]
+            K_valid = all_samples[valid_mask, 7]
             
             # Multi-objective cost function with normalized weights
             # Normalize each objective to [0, 1] range
@@ -572,8 +579,8 @@ if __name__ == "__main__":
             A_target = A_valid[best_idx]
             Qdot_target = Qdot_valid[best_idx]
             gam_f_target = gam_f_valid[best_idx]
-            sigma1_best = sigma1_valid[best_idx]
-            sigma2_best = sigma2_valid[best_idx]
+            sigma0_best = sigma0_valid[best_idx]
+            K_best = K_valid[best_idx]
             cost_target = cost[best_idx]
             
             print(f"\nBest target selected (cost = {cost_target:.4f}):")
@@ -586,7 +593,7 @@ if __name__ == "__main__":
             print(f"  Max q:             {q_target:8.1f} Pa")
             print(f"  Max A:             {A_target:5.2f} g")
             print(f"  Max Qdot:          {Qdot_target:8.1f} W/m²")
-            print(f"  Control: σ1={sigma1_best:6.2f}°, σ2={sigma2_best:6.2f}°")
+            print(f"  Control: σ0={sigma0_best:6.2f}°, K={K_best:.3f}")
             
             # ============================================================
             # SIMULATE BEST TRAJECTORY WITH FULL TRACE
@@ -602,47 +609,42 @@ if __name__ == "__main__":
             psi0 = np.deg2rad(-2.8758)
             state0 = np.array([r0, lon0, lat0, V0, gam0, psi0])
             
-            # First pass: estimate trajectory duration
+            # Compute initial and final energies
+            E0 = compute_energy(r0, V0)
+            h_final = 6000.0
+            V_final = 475.0
+            r_final = mars.radius + h_final
+            Ef = compute_energy(r_final, V_final)
+            
+            sigma0_rad = np.deg2rad(sigma0_best)
+            sigma_max_rad = np.deg2rad(120.0)
+            
             dt_sim = 0.25
             tmax_sim = 4000.0
-            sigma1_rad = np.deg2rad(sigma1_best)
-            sigma2_rad = np.deg2rad(sigma2_best)
             
-            state = state0.copy()
-            t = 0.0
-            
-            while t < tmax_sim:
-                sigma = bank_profile_three_section(t, tmax_sim, sigma1_rad, sigma2_rad)
-                state = rk4_step(eom, state, sigma, dt_sim)
-                h, rho, q, A_total, Qdot = compute_loads(state)
-                r, th, ph, V, gam, psi = state
-                
-                if deploy_trigger(h, V, q):
-                    break
-                t += dt_sim
-            
-            t_actual = t
-            print(f"Estimated trajectory duration: {t_actual:.2f} s")
-            
-            # Second pass: simulate with bank profile normalized to actual duration
             state = state0.copy()
             t = 0.0
             times = [t]
             states = [state.copy()]
-            sigmas = [bank_profile_three_section(t, t_actual, sigma1_rad, sigma2_rad)]
+            sigmas = []
             q_hist = []
             A_hist = []
             Qdot_hist = []
             mach_hist = []
             
             while t < tmax_sim:
-                sigma = bank_profile_three_section(t, t_actual, sigma1_rad, sigma2_rad)
+                # Compute current energy and bank angle
+                r, th, ph, V, gam, psi = state
+                E = compute_energy(r, V)
+                sigma = sigma_logistic_ref(E, E0, Ef, sigma0_rad, K_best, sigma_max_rad)
+                sigmas.append(sigma)
+                
+                # Integrate
                 state = rk4_step(eom, state, sigma, dt_sim)
                 t += dt_sim
                 
                 times.append(t)
                 states.append(state.copy())
-                sigmas.append(sigma)
                 
                 # Compute loads
                 h, rho, q, A_total, Qdot = compute_loads(state)
@@ -732,12 +734,12 @@ if __name__ == "__main__":
             axes_states[3].grid(True, alpha=0.3)
             
             # Bank angle
-            axes_states[4].plot(times, sigma_traj, 'k-', lw=2)
-            axes_states[4].axhline(81, ls='--', color='red', alpha=0.5)
-            axes_states[4].axhline(-81, ls='--', color='red', alpha=0.5)
+            axes_states[4].plot(times[:-1], sigma_traj, 'k-', lw=2)
+            axes_states[4].axhline(120, ls='--', color='red', alpha=0.5)
+            axes_states[4].axhline(-120, ls='--', color='red', alpha=0.5)
             axes_states[4].set_xlabel('Time [s]')
             axes_states[4].set_ylabel('σ [deg]')
-            axes_states[4].set_title('Bank Angle')
+            axes_states[4].set_title('Bank Angle (Logistic)')
             axes_states[4].grid(True, alpha=0.3)
             
             # Latitude
@@ -772,7 +774,7 @@ if __name__ == "__main__":
             axes_states[8].legend(fontsize=8)
             axes_states[8].grid(True, alpha=0.3)
             
-            plt.suptitle(f'Best Trajectory: σ1={sigma1_best:.1f}°, σ2={sigma2_best:.1f}°', 
+            plt.suptitle(f'Best Trajectory (Logistic): σ0={sigma0_best:.1f}°, K={K_best:.2f}', 
                         fontsize=14, fontweight='bold')
             plt.tight_layout()
             
@@ -806,9 +808,3 @@ if __name__ == "__main__":
         print("No samples at all – check grid or initial conditions.")
 
     plt.show()
-
-
-
-
-
-

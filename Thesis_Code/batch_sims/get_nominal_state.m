@@ -286,3 +286,47 @@ xlabel('Specific energy E [MJ/kg]');
 ylabel('g-load [g]');
 title('Total Acceleration vs Energy');
 
+%% ============================================================
+%  CONSOLE SUMMARY – Nominal trajectory key metrics
+%% ============================================================
+
+% Final index
+i_end = numel(ref.t);
+
+% Final geometry (in km)
+RD_final_km  = RD_km(i_end);         % downrange [km]
+RC_final_km  = RC_km(i_end);         % crossrange [km]
+Rgo_final_km = Rgo_km(i_end);        % range-to-go [km]
+
+% Final state
+h_final_km      = h_km(i_end);       % altitude [km]
+V_final         = ref.V(i_end);      % velocity [m/s]
+mach_final      = ref.mach(i_end);   % Mach [-]
+gamma_final_deg = gamma_deg(i_end);  % flight path angle [deg]
+E_final_MJ      = E_MJ(i_end);       % specific energy [MJ/kg]
+
+% Peak path constraints
+q_peak_kPa     = max(q_kPa);
+Qdot_peak_kW   = max(Qdot_kW);
+gload_peak_g   = max(g_load_g);
+
+fprintf('\n========== NOMINAL TRAJECTORY SUMMARY ==========\n');
+fprintf('Final geometry:\n');
+fprintf('  RD_final   = %8.3f km\n', RD_final_km);
+fprintf('  RC_final   = %8.3f km\n', RC_final_km);
+fprintf('  Rgo_final  = %8.3f km\n', Rgo_final_km);
+
+fprintf('\nFinal state at end of entry / deploy:\n');
+fprintf('  h_final    = %8.3f km\n', h_final_km);
+fprintf('  V_final    = %8.2f m/s\n', V_final);
+fprintf('  Mach_final = %8.3f [-]\n', mach_final);
+fprintf('  gamma_final= %8.3f deg\n', gamma_final_deg);
+fprintf('  E_final    = %8.3f MJ/kg\n', E_final_MJ);
+
+fprintf('\nPeak path constraints along trajectory:\n');
+fprintf('  q_peak     = %8.3f kPa\n', q_peak_kPa);
+fprintf('  Qdot_peak  = %8.3f kW/m^2\n', Qdot_peak_kW);
+fprintf('  g_peak     = %8.3f g\n',  gload_peak_g);
+fprintf('================================================\n\n');
+
+

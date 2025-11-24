@@ -49,14 +49,14 @@ phi0   = (-21.3)*deg2rad;      % Initial latitude [deg]
 V0  = 5000;          % Initial velocity [m/s]
 gamma0 = (-12)*deg2rad;        % Initial flight path angle [deg]
 psi0   = (-2.8758)*deg2rad;    % Initial heading angle [deg]
-
+e_0 = Mars_mu / r0 - 0.5 * V0^2;
 %% Final Conditions Mars reachable plots
-theta_t = (-176.321)*deg2rad;   % Target longitude [deg]
-phi_t   = (-4.856)*deg2rad;    % Target latitude [deg]
-%V_t     = 450;      % Final velocity [m/s]
-%h_t     = 2480;     % Final altitude [m]
-%rt = (h_t+Mars_radius);
-%e_t = Mars_mu / rt - 0.5 * V_t^2;
+theta_t = (-176.392)*deg2rad;   % Target longitude [deg]
+phi_t   = (-4.887)*deg2rad;    % Target latitude [deg]
+V_t     = 475;      % Final velocity [m/s]
+h_t     = 600;     % Final altitude [m]
+rt = (h_t+Mars_radius);
+e_t = Mars_mu / rt - 0.5 * V_t^2;
 %% Parachute deployment constraints
 % Targeting accuracy (within 5 km of target on the surface)
 Rgo_max = 5e3;        % [m] max allowed range-to-go at deploy
@@ -73,9 +73,13 @@ q_chute_max   = 8e2;        % [Pa] example value, tune from parachute spec
 h_chute_min   = 6e3;      % [m] e.g. 0 km MOLA; increase if you want extra margin
 
 % Bank-angle sanity check (optional for supervisor later)
-sigma_max_allowed = 81*deg2rad;  % [rad] example max |sigma| 90º deegres with 10% margin to avoid saturation
+sigma_max_allowed = 120*deg2rad;  % [rad] example max |sigma| 90º deegres with 10% margin to avoid saturation
 sigma_max_rate = 20; %deg/s
 sigma_max_rate_accel = 5; %deg/s^2
+
+%Logistic Variables
+sigma_logistic_0 = 40*deg2rad;
+K_logistic = 1.578;
 
 %% Entry Vehicle Aerodynamic Properties
 mass = 2804; % Mass [kg]

@@ -145,7 +145,7 @@ def rk4_step(f, state, sigma, dt):
 # This section defines the optimization problem setup
 
 # Collocation discretization parameters
-DT = 0.25           # [s] Integration timestep (not used directly, dt is optimized)
+DT = 0.20           # [s] Integration timestep (not used directly, dt is optimized)
 N_SEGMENTS = 150   # Number of collocation segments
                    # More segments = higher fidelity but more decision variables
                    # 100 segments → 707 decision variables total
@@ -155,7 +155,7 @@ deg = np.deg2rad   # Convenience function for degree to radian conversion
 h0   = 125e3       # [m] Entry altitude (125 km)
 r0   = mars.radius + h0  # [m] Entry radius from Mars center
 V0   = 5000.0      # [m/s] Entry velocity
-gam0 = deg(-15.0)  # [rad] Entry flight path angle (negative = descending)
+gam0 = deg(-12.0)  # [rad] Entry flight path angle (negative = descending)
 psi0 = deg(-2.8758) # [rad] Entry heading angle
 lat0 = deg(-21.5)  # [rad] Entry latitude
 lon0 = deg(-176.40167)   # [rad] Entry longitude
@@ -179,7 +179,7 @@ SIGMA_DOT_DOT_MIN = -deg(5.0)
 
 # Objective function weights
 # Maximize altitude while minimizing gamma^2 for control authority
-W_ALTITUDE = 1.0      # Weight for altitude maximization
+W_ALTITUDE = 1.0     # Weight for altitude maximization
 W_GAMMA = 5.0e6        # Weight for gamma^2 minimization (control authority)
 
 # Soft penalty weights for deployment criteria (guide without enforcing)
@@ -273,7 +273,7 @@ def solve_collocation(lat_target_in=None, lon_target_in=None):
     print(f"Objective: Maximize altitude with soft deployment penalties")
     print(f"Weights: W_altitude={W_ALTITUDE}, W_gamma={W_GAMMA}")
     print(f"Soft penalties: Mach={W_MACH_PENALTY}, q={W_Q_PENALTY}, h={W_H_PENALTY}")
-    print(f"Target deployment: Mach [1.4-2.2], q [300-800 Pa], h >= 6 km")
+    print(f"Target deployment: Mach [1.5-2.5], q [300-800 Pa], h >= 6 km")
     print("="*70)
     
     # Create CasADi optimization problem (Opti stack)
@@ -450,11 +450,11 @@ def solve_collocation(lat_target_in=None, lon_target_in=None):
     for k in range(N_SEGMENTS):
         # Determine bank angle based on bang-bang structure
         if k < switch_1:
-            sigma_k = deg(69)      # Phase 1: 0 degrees (straight)
+            sigma_k = deg(81)      # Phase 1: 0 degrees (straight)
         elif k < switch_2:
-            sigma_k = deg(35)     # Phase 2: +81 degrees (right roll, 10% margin)
+            sigma_k = deg(0)     # Phase 2: +81 degrees (right roll, 10% margin)
         elif k < switch_3:
-            sigma_k = deg(9)    # Phase 3: -81 degrees (left roll, 10% margin)
+            sigma_k = deg(0)    # Phase 3: -81 degrees (left roll, 10% margin)
         else:
             sigma_k = deg(0)      # Phase 4: 0 degrees (straight)
         
@@ -640,6 +640,11 @@ def solve_collocation(lat_target_in=None, lon_target_in=None):
     for key in ["rho", "q", "mach", "Rgo", "RC", "RD", "RD_go"]:
         hist[key] = np.array(hist[key])
     
+    # ===== COMPUTE ENERGY HISTORY =====
+    # Calculate specific mechanical energy at each node
+    hist["E"] = np.array([-mars.mu / X_sol[0, i] - 0.5 * X_sol[3, i]**2 
+                          for i in range(N_SEGMENTS + 1)])
+    
     # ===== PRINT SOLUTION SUMMARY =====
     print(f"\nSolution time: {elapsed:.1f} s")  # How long IPOPT took
     print(f"Final altitude: {hist['h'][-1]:.2f} km")  # Deployment altitude (objective)
@@ -701,8 +706,8 @@ def solve_collocation(lat_target_in=None, lon_target_in=None):
     
     # Check against typical deployment criteria (for reference only)
     print(f"\nTypical Deployment Criteria (for reference):")
-    MACH_MIN = 1.5
-    MACH_MAX = 2.5
+    MACH_MIN = 1.50
+    MACH_MAX = 2.50
     Q_MIN = 300.0
     Q_MAX = 800.0
     H_MIN = 6.0
@@ -723,6 +728,80 @@ def solve_collocation(lat_target_in=None, lon_target_in=None):
     print("="*70)
     
     return sol, hist, success
+
+# ============================================================
+# LOGISTIC FIT FUNCTION
+# ============================================================
+def fit_logistic_to_collocation(hist):
+    """
+    Fit a logistic energy-based bank angle function to the collocation result.
+    
+    Tries to find sigma0 and K that best match the optimized bank angle profile.
+    Uses least-squares fitting on the normalized energy vs bank angle relationship.
+    
+    Args:
+        hist: trajectory history dictionary with energy and bank angle
+    
+    Returns:
+        sigma0_fit: fitted initial bank angle [rad]
+        K_fit: fitted decay rate
+        sigma_logistic: logistic approximation of bank angle profile [rad]
+    """
+    from scipy.optimize import curve_fit
+    
+    # Extract data
+    E = hist["E"]  # Specific energy [J/kg]
+    sigma_opt = hist["sigma"][:-1]  # Remove duplicate last point
+    E = E[:-1]  # Match lengths
+    
+    # Define energy reference points
+    E0 = E[0]  # Initial energy
+    Ef = E[-1]  # Final energy
+    
+    # Normalized energy: z = (E - E0) / (Ef - E0)
+    z = (E - E0) / (Ef - E0)
+    
+    # Define logistic function for fitting: sigma = 2*sigma0 / (1 + exp(K*z))
+    def logistic_func(z, sigma0, K):
+        return 2 * sigma0 / (1 + np.exp(K * z))
+    
+    # Initial guess for parameters
+    # sigma0: initial bank angle (use first value)
+    # K: decay rate (start with 1.0)
+    p0 = [sigma_opt[0] / 2, 1.0]
+    
+    # Bounds: sigma0 in [-120°, 120°], K in [0.01, 10]
+    bounds = ([np.deg2rad(-120), 0.01], [np.deg2rad(120), 10.0])
+    
+    try:
+        # Perform curve fit
+        popt, _ = curve_fit(logistic_func, z, sigma_opt, p0=p0, bounds=bounds, maxfev=10000)
+        sigma0_fit, K_fit = popt
+        
+        # Generate logistic profile for full trajectory
+        sigma_logistic = logistic_func(z, sigma0_fit, K_fit)
+        
+        # Compute fit quality (R²)
+        ss_res = np.sum((sigma_opt - sigma_logistic)**2)
+        ss_tot = np.sum((sigma_opt - np.mean(sigma_opt))**2)
+        r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+        
+        print("\n" + "="*70)
+        print("LOGISTIC FUNCTION FIT TO COLLOCATION RESULT")
+        print("="*70)
+        print(f"Fitted parameters:")
+        print(f"  σ0 = {np.rad2deg(sigma0_fit):7.2f}° (initial bank angle)")
+        print(f"  K  = {K_fit:7.3f} (decay rate)")
+        print(f"\nFit quality:")
+        print(f"  R² = {r_squared:.4f}")
+        print(f"  RMSE = {np.sqrt(np.mean((sigma_opt - sigma_logistic)**2)):.4f} rad ({np.rad2deg(np.sqrt(np.mean((sigma_opt - sigma_logistic)**2))):.2f}°)")
+        print("="*70)
+        
+        return sigma0_fit, K_fit, sigma_logistic, r_squared
+        
+    except Exception as e:
+        print(f"\nLogistic fit failed: {e}")
+        return None, None, None, None
 
 # ============================================================
 # PLOTTING
@@ -844,8 +923,8 @@ def plot_results(sol, hist):
     fig3, ax3 = plt.subplots(figsize=(10, 8))
     
     # Define deployment constraints
-    MACH_MIN = 1.4  # Minimum Mach number for deployment
-    MACH_MAX = 2.2    # Maximum Mach number for deployment
+    MACH_MIN = 1.5  # Minimum Mach number for deployment
+    MACH_MAX = 2.5    # Maximum Mach number for deployment
     Q_MIN = 300.0     # [Pa] Minimum dynamic pressure
     Q_MAX = 800.0     # [Pa] Maximum dynamic pressure
     H_MIN = 6.0       # [km] Minimum altitude for deployment
@@ -964,6 +1043,339 @@ def plot_results(sol, hist):
     plt.colorbar(sc, ax=ax, label='Time [s]')
     plt.tight_layout()
     plt.show()
+    
+    # ===== LOGISTIC FIT COMPARISON =====
+    # Fit logistic function to collocation result
+    sigma0_fit, K_fit, sigma_logistic, r_squared = fit_logistic_to_collocation(hist)
+    
+    if sigma0_fit is not None:
+        # Create comparison figure
+        fig4 = plt.figure(figsize=(14, 10))
+        fig4.suptitle(f'Logistic Approximation of Collocation Result (σ0={np.rad2deg(sigma0_fit):.1f}°, K={K_fit:.2f}, R²={r_squared:.4f})', 
+                     fontsize=14, fontweight='bold')
+        
+        # 1. Bank angle vs time
+        ax1 = plt.subplot(2, 2, 1)
+        ax1.plot(t[:-1], np.rad2deg(hist["sigma"][:-1]), 'b-', lw=2.5, label='Collocation Optimal')
+        ax1.plot(t[:-1], np.rad2deg(sigma_logistic), 'r--', lw=2, label=f'Logistic Fit (σ0={np.rad2deg(sigma0_fit):.1f}°, K={K_fit:.2f})')
+        ax1.set_xlabel('Time [s]')
+        ax1.set_ylabel('Bank Angle σ [deg]')
+        ax1.set_title('Bank Angle vs Time')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # 2. Bank angle vs normalized energy
+        E = hist["E"][:-1]
+        E0 = E[0]
+        Ef = E[-1]
+        z = (E - E0) / (Ef - E0)
+        
+        ax2 = plt.subplot(2, 2, 2)
+        ax2.plot(z, np.rad2deg(hist["sigma"][:-1]), 'b-', lw=2.5, label='Collocation Optimal')
+        ax2.plot(z, np.rad2deg(sigma_logistic), 'r--', lw=2, label='Logistic Fit')
+        ax2.set_xlabel('Normalized Energy z = (E-E₀)/(Ef-E₀)')
+        ax2.set_ylabel('Bank Angle σ [deg]')
+        ax2.set_title('Bank Angle vs Normalized Energy')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        # 3. Bank angle vs altitude
+        ax3 = plt.subplot(2, 2, 3)
+        ax3.plot(h[:-1], np.rad2deg(hist["sigma"][:-1]), 'b-', lw=2.5, label='Collocation Optimal')
+        ax3.plot(h[:-1], np.rad2deg(sigma_logistic), 'r--', lw=2, label='Logistic Fit')
+        ax3.set_xlabel('Altitude [km]')
+        ax3.set_ylabel('Bank Angle σ [deg]')
+        ax3.set_title('Bank Angle vs Altitude')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+        
+        # 4. Residual (error) plot
+        ax4 = plt.subplot(2, 2, 4)
+        residual = np.rad2deg(hist["sigma"][:-1] - sigma_logistic)
+        ax4.plot(t[:-1], residual, 'g-', lw=2)
+        ax4.axhline(0, color='k', ls='--', lw=1, alpha=0.5)
+        ax4.set_xlabel('Time [s]')
+        ax4.set_ylabel('Residual [deg]')
+        ax4.set_title(f'Fitting Error (RMSE = {np.std(residual):.2f}°)')
+        ax4.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+        
+        # Print comparison statistics
+        print("\n" + "="*70)
+        print("LOGISTIC FIT STATISTICS")
+        print("="*70)
+        print(f"Maximum error:     {np.max(np.abs(residual)):.2f}°")
+        print(f"Mean error:        {np.mean(residual):.2f}°")
+        print(f"Std deviation:     {np.std(residual):.2f}°")
+        print(f"Error at start:    {residual[0]:.2f}°")
+        print(f"Error at end:      {residual[-1]:.2f}°")
+        print(f"Error at midpoint: {residual[len(residual)//2]:.2f}°")
+        print("="*70)
+        
+        # ===== SIMULATE WITH LOGISTIC PARAMETERS =====
+        # Now run a forward simulation using the fitted logistic parameters
+        print("\n" + "="*70)
+        print("SIMULATING WITH FITTED LOGISTIC PARAMETERS")
+        print("="*70)
+        
+        # Extract initial conditions and energy references
+        E0 = hist["E"][0]
+        Ef = hist["E"][-1]
+        dt_sim = hist["t"][1] - hist["t"][0]  # Use same timestep as collocation
+        
+        # Simulate forward using RK4 with logistic bank angle
+        state_sim = state0.copy()
+        t_sim = [0]
+        states_sim = [state_sim.copy()]
+        sigmas_sim = []
+        
+        # Compute initial energy and bank angle
+        E_current = -mars.mu / state_sim[0] - 0.5 * state_sim[3]**2
+        z_current = (E_current - E0) / (Ef - E0)
+        sigma_current = 2 * sigma0_fit / (1 + np.exp(K_fit * z_current))
+        sigma_current = np.clip(sigma_current, np.deg2rad(-120), np.deg2rad(120))
+        sigmas_sim.append(sigma_current)
+        
+        # Deployment trigger function
+        def check_deployment(state):
+            r, _, _, V, _, _ = state
+            h = r - mars.radius
+            rho = mars.rho0 * np.exp(-h / mars.Hs)
+            q = 0.5 * rho * V**2
+            
+            # Compute Mach
+            h_km = h / 1e3
+            T = 1.4e-13 * h_km**3 - 8.85e-9 * h_km**2 - 1.245e-3 * h_km + 205.36
+            a_sound = np.sqrt(mars.gamma_gas * mars.R_gas * max(T, 1.0))
+            mach = V / max(a_sound, 1e-6)
+            
+            # Parachute deployment conditions
+            return ((1.5 <= mach <= 2.5) and (300.0 <= q <= 800.0)) or (h <= 6000.0)
+        
+        # Simulate until deployment or max time
+        max_time = hist["t"][-1] * 1.5  # Allow 50% longer
+        while t_sim[-1] < max_time:
+            # Compute current energy
+            E_current = -mars.mu / state_sim[0] - 0.5 * state_sim[3]**2
+            z_current = (E_current - E0) / (Ef - E0)
+            
+            # Compute bank angle using logistic function
+            sigma_current = 2 * sigma0_fit / (1 + np.exp(K_fit * z_current))
+            sigma_current = np.clip(sigma_current, np.deg2rad(-120), np.deg2rad(120))
+            
+            # Integrate one step
+            state_sim = rk4_step(eom, state_sim, sigma_current, dt_sim)
+            t_sim.append(t_sim[-1] + dt_sim)
+            states_sim.append(state_sim.copy())
+            sigmas_sim.append(sigma_current)
+            
+            # Check deployment
+            if check_deployment(state_sim):
+                print(f"Deployment triggered at t = {t_sim[-1]:.2f} s")
+                break
+            
+            # Safety check for ground impact
+            if state_sim[0] - mars.radius < 0:
+                print("Ground impact!")
+                break
+        
+        # Convert to arrays
+        t_sim = np.array(t_sim)
+        states_sim = np.array(states_sim)
+        sigmas_sim = np.array(sigmas_sim)
+        
+        # Compute derived quantities for simulation
+        h_sim = (states_sim[:, 0] - mars.radius) / 1e3  # [km]
+        V_sim = states_sim[:, 3]
+        gam_sim = states_sim[:, 4]
+        lat_sim = states_sim[:, 2]
+        lon_sim = states_sim[:, 1]
+        
+        # Compute final metrics
+        r_f_sim = states_sim[-1, 0]
+        V_f_sim = states_sim[-1, 3]
+        gam_f_sim = states_sim[-1, 4]
+        h_f_sim = h_sim[-1]
+        lat_f_sim = lat_sim[-1]
+        lon_f_sim = lon_sim[-1]
+        
+        # Compute final dynamic pressure and Mach
+        rho_f_sim = mars.rho0 * np.exp(-(r_f_sim - mars.radius) / mars.Hs)
+        q_f_sim = 0.5 * rho_f_sim * V_f_sim**2
+        
+        h_km_f_sim = h_f_sim
+        T_f_sim = 1.4e-13 * h_km_f_sim**3 - 8.85e-9 * h_km_f_sim**2 - 1.245e-3 * h_km_f_sim + 205.36
+        a_sound_f_sim = np.sqrt(mars.gamma_gas * mars.R_gas * max(T_f_sim, 1.0))
+        mach_f_sim = V_f_sim / max(a_sound_f_sim, 1e-6)
+        
+        # Compute spherical metrics
+        _, _, _, RC_f_sim, RD_f_sim, RD_go_f_sim, Rgo_f_sim = spherical_metrics(
+            lat0, lon0, lat_f_sim, lon_f_sim, lat_target, lon_target, mars.radius
+        )
+        
+        # ===== COMPARISON AND ERROR ANALYSIS =====
+        print("\n" + "="*70)
+        print("COMPARISON: COLLOCATION vs LOGISTIC SIMULATION")
+        print("="*70)
+        
+        # Extract collocation final values
+        h_f_col = hist["h"][-1]
+        V_f_col = hist["V"][-1]
+        gam_f_col = hist["gam"][-1]
+        lat_f_col = hist["lat"][-1]
+        lon_f_col = hist["lon"][-1]
+        mach_f_col = hist["mach"][-1]
+        q_f_col = hist["q"][-1]
+        Rgo_f_col = hist["Rgo"][-1]
+        RC_f_col = hist["RC"][-1]
+        RD_f_col = hist["RD"][-1]
+        t_f_col = hist["t"][-1]
+        
+        # Convert simulation results to same units
+        Rgo_f_sim_km = Rgo_f_sim / 1e3
+        RC_f_sim_km = RC_f_sim / 1e3
+        RD_f_sim_km = RD_f_sim / 1e3
+        t_f_sim = t_sim[-1]
+        
+        # Compute errors
+        err_h = h_f_sim - h_f_col
+        err_V = V_f_sim - V_f_col
+        err_gam = np.rad2deg(gam_f_sim - gam_f_col)
+        err_lat = np.rad2deg(lat_f_sim - lat_f_col)
+        err_lon = np.rad2deg(lon_f_sim - lon_f_col)
+        err_mach = mach_f_sim - mach_f_col
+        err_q = q_f_sim - q_f_col
+        err_Rgo = Rgo_f_sim_km - Rgo_f_col
+        err_RC = RC_f_sim_km - RC_f_col
+        err_RD = RD_f_sim_km - RD_f_col
+        err_t = t_f_sim - t_f_col
+        
+        # Compute percentage errors
+        pct_h = (err_h / h_f_col) * 100 if h_f_col != 0 else 0
+        pct_V = (err_V / V_f_col) * 100 if V_f_col != 0 else 0
+        pct_mach = (err_mach / mach_f_col) * 100 if mach_f_col != 0 else 0
+        pct_q = (err_q / q_f_col) * 100 if q_f_col != 0 else 0
+        pct_Rgo = (err_Rgo / Rgo_f_col) * 100 if Rgo_f_col != 0 else 0
+        pct_t = (err_t / t_f_col) * 100 if t_f_col != 0 else 0
+        
+        print("\nFinal State Comparison:")
+        print(f"{'Quantity':<20} {'Collocation':>15} {'Logistic Sim':>15} {'Error':>15} {'% Error':>10}")
+        print("-" * 80)
+        print(f"{'Altitude [km]':<20} {h_f_col:>15.3f} {h_f_sim:>15.3f} {err_h:>15.3f} {pct_h:>9.2f}%")
+        print(f"{'Velocity [m/s]':<20} {V_f_col:>15.2f} {V_f_sim:>15.2f} {err_V:>15.2f} {pct_V:>9.2f}%")
+        print(f"{'FPA γ [deg]':<20} {np.rad2deg(gam_f_col):>15.3f} {np.rad2deg(gam_f_sim):>15.3f} {err_gam:>15.3f} {'-':>10}")
+        print(f"{'Latitude [deg]':<20} {np.rad2deg(lat_f_col):>15.4f} {np.rad2deg(lat_f_sim):>15.4f} {err_lat:>15.4f} {'-':>10}")
+        print(f"{'Longitude [deg]':<20} {np.rad2deg(lon_f_col):>15.4f} {np.rad2deg(lon_f_sim):>15.4f} {err_lon:>15.4f} {'-':>10}")
+        print(f"{'Mach number':<20} {mach_f_col:>15.3f} {mach_f_sim:>15.3f} {err_mach:>15.3f} {pct_mach:>9.2f}%")
+        print(f"{'Dyn. pressure [Pa]':<20} {q_f_col:>15.1f} {q_f_sim:>15.1f} {err_q:>15.1f} {pct_q:>9.2f}%")
+        print(f"{'Range-to-go [km]':<20} {Rgo_f_col:>15.2f} {Rgo_f_sim_km:>15.2f} {err_Rgo:>15.2f} {pct_Rgo:>9.2f}%")
+        print(f"{'Crossrange [km]':<20} {RC_f_col:>15.2f} {RC_f_sim_km:>15.2f} {err_RC:>15.2f} {'-':>10}")
+        print(f"{'Downrange [km]':<20} {RD_f_col:>15.2f} {RD_f_sim_km:>15.2f} {err_RD:>15.2f} {'-':>10}")
+        print(f"{'Time [s]':<20} {t_f_col:>15.2f} {t_f_sim:>15.2f} {err_t:>15.2f} {pct_t:>9.2f}%")
+        print("="*80)
+        
+        # Compute RMSE for trajectory matching
+        # Interpolate simulation onto collocation time grid
+        from scipy.interpolate import interp1d
+        
+        # Create interpolation functions for simulation
+        h_sim_interp = interp1d(t_sim, h_sim, kind='cubic', fill_value='extrapolate')
+        V_sim_interp = interp1d(t_sim, V_sim, kind='cubic', fill_value='extrapolate')
+        gam_sim_interp = interp1d(t_sim, gam_sim, kind='cubic', fill_value='extrapolate')
+        
+        # Evaluate at collocation time points (only where simulation has data)
+        t_common = hist["t"][hist["t"] <= t_sim[-1]]
+        h_col_common = hist["h"][:len(t_common)]
+        V_col_common = hist["V"][:len(t_common)]
+        gam_col_common = hist["gam"][:len(t_common)]
+        
+        h_sim_common = h_sim_interp(t_common)
+        V_sim_common = V_sim_interp(t_common)
+        gam_sim_common = gam_sim_interp(t_common)
+        
+        # Compute RMS errors over trajectory
+        rmse_h = np.sqrt(np.mean((h_col_common - h_sim_common)**2))
+        rmse_V = np.sqrt(np.mean((V_col_common - V_sim_common)**2))
+        rmse_gam = np.rad2deg(np.sqrt(np.mean((gam_col_common - gam_sim_common)**2)))
+        
+        print("\nTrajectory RMSE (Root Mean Square Error):")
+        print(f"  Altitude:   {rmse_h:.3f} km")
+        print(f"  Velocity:   {rmse_V:.2f} m/s")
+        print(f"  FPA γ:      {rmse_gam:.3f} deg")
+        print("="*70)
+        
+        # Create comparison trajectory plot
+        fig5 = plt.figure(figsize=(14, 10))
+        fig5.suptitle('Trajectory Comparison: Collocation vs Logistic Simulation', 
+                     fontsize=14, fontweight='bold')
+        
+        axes_comp = []
+        for i in range(6):
+            axes_comp.append(plt.subplot(2, 3, i+1))
+        
+        # Altitude
+        axes_comp[0].plot(hist["t"], hist["h"], 'b-', lw=2.5, label='Collocation')
+        axes_comp[0].plot(t_sim, h_sim, 'r--', lw=2, label='Logistic Sim')
+        axes_comp[0].set_xlabel('Time [s]')
+        axes_comp[0].set_ylabel('Altitude [km]')
+        axes_comp[0].set_title(f'Altitude (RMSE={rmse_h:.3f} km)')
+        axes_comp[0].legend()
+        axes_comp[0].grid(True, alpha=0.3)
+        
+        # Velocity
+        axes_comp[1].plot(hist["t"], hist["V"], 'b-', lw=2.5, label='Collocation')
+        axes_comp[1].plot(t_sim, V_sim, 'r--', lw=2, label='Logistic Sim')
+        axes_comp[1].set_xlabel('Time [s]')
+        axes_comp[1].set_ylabel('Velocity [m/s]')
+        axes_comp[1].set_title(f'Velocity (RMSE={rmse_V:.2f} m/s)')
+        axes_comp[1].legend()
+        axes_comp[1].grid(True, alpha=0.3)
+        
+        # Flight path angle
+        axes_comp[2].plot(hist["t"], np.rad2deg(hist["gam"]), 'b-', lw=2.5, label='Collocation')
+        axes_comp[2].plot(t_sim, np.rad2deg(gam_sim), 'r--', lw=2, label='Logistic Sim')
+        axes_comp[2].set_xlabel('Time [s]')
+        axes_comp[2].set_ylabel('γ [deg]')
+        axes_comp[2].set_title(f'Flight Path Angle (RMSE={rmse_gam:.3f}°)')
+        axes_comp[2].legend()
+        axes_comp[2].grid(True, alpha=0.3)
+        
+        # Bank angle
+        axes_comp[3].plot(hist["t"][:-1], np.rad2deg(hist["sigma"][:-1]), 'b-', lw=2.5, label='Collocation')
+        axes_comp[3].plot(t_sim, np.rad2deg(sigmas_sim), 'r--', lw=2, label='Logistic Sim')
+        axes_comp[3].set_xlabel('Time [s]')
+        axes_comp[3].set_ylabel('σ [deg]')
+        axes_comp[3].set_title('Bank Angle')
+        axes_comp[3].legend()
+        axes_comp[3].grid(True, alpha=0.3)
+        
+        # Altitude vs Velocity
+        axes_comp[4].plot(hist["V"], hist["h"], 'b-', lw=2.5, label='Collocation')
+        axes_comp[4].plot(V_sim, h_sim, 'r--', lw=2, label='Logistic Sim')
+        axes_comp[4].plot(hist["V"][-1], hist["h"][-1], 'b*', ms=15, markeredgecolor='darkblue')
+        axes_comp[4].plot(V_sim[-1], h_sim[-1], 'r*', ms=15, markeredgecolor='darkred')
+        axes_comp[4].set_xlabel('Velocity [m/s]')
+        axes_comp[4].set_ylabel('Altitude [km]')
+        axes_comp[4].set_title('Altitude-Velocity Profile')
+        axes_comp[4].legend()
+        axes_comp[4].grid(True, alpha=0.3)
+        
+        # Ground track
+        axes_comp[5].plot(np.rad2deg(hist["lon"]), np.rad2deg(hist["lat"]), 'b-', lw=2.5, label='Collocation')
+        axes_comp[5].plot(np.rad2deg(lon_sim), np.rad2deg(lat_sim), 'r--', lw=2, label='Logistic Sim')
+        axes_comp[5].plot(np.rad2deg(lon0), np.rad2deg(lat0), 'go', ms=10, label='Entry')
+        axes_comp[5].plot(np.rad2deg(hist["lon"][-1]), np.rad2deg(hist["lat"][-1]), 'b*', ms=15, markeredgecolor='darkblue')
+        axes_comp[5].plot(np.rad2deg(lon_sim[-1]), np.rad2deg(lat_sim[-1]), 'r*', ms=15, markeredgecolor='darkred')
+        axes_comp[5].set_xlabel('Longitude [deg]')
+        axes_comp[5].set_ylabel('Latitude [deg]')
+        axes_comp[5].set_title('Ground Track')
+        axes_comp[5].legend()
+        axes_comp[5].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
 
 # ============================================================
 # MAIN EXECUTION
