@@ -341,9 +341,9 @@ if __name__ == "__main__":
     lon0 = -176.40167 * deg2rad
 
     # Sweep control parameters: sigma0 in range [-120°, +120°] and K in [0.1, 2.0]
-    # Coarse mesh for speed (10x10 = 100 simulations)
-    sigma0_grid = np.linspace(np.deg2rad(-120), np.deg2rad(120), 10)
-    K_grid = np.linspace(0.1, 2.0, 10)
+    # Coarse mesh for speed (100 x 100 = 10000 simulations)
+    sigma0_grid = np.linspace(np.deg2rad(-120), np.deg2rad(120), 100)
+    K_grid = np.linspace(0.1, 2.0, 100)
 
     print(f"Building reachable set with {len(sigma0_grid)} x {len(K_grid)} = {len(sigma0_grid)*len(K_grid)} control parameter combinations")
     print(f"sigma0 range: [{np.degrees(sigma0_grid[0]):.1f}°, {np.degrees(sigma0_grid[-1]):.1f}°]")
