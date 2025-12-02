@@ -47,12 +47,12 @@ r0 = (h0+Mars_radius);
 theta0 = -176.40167*deg2rad; % Initial longitude [deg]
 phi0   = (-21.3)*deg2rad;      % Initial latitude [deg]
 V0  = 5000;          % Initial velocity [m/s]
-gamma0 = (-12)*deg2rad;        % Initial flight path angle [deg]
+gamma0 = (-15)*deg2rad;        % Initial flight path angle [deg]
 psi0   = (-2.8758)*deg2rad;    % Initial heading angle [deg]
 e_0 = Mars_mu / r0 - 0.5 * V0^2;
 %% Final Conditions Mars reachable plots
-theta_t = (-176.392)*deg2rad;   % Target longitude [deg]
-phi_t   = (-4.887)*deg2rad;    % Target latitude [deg]
+theta_t = -176.341*deg2rad;%(-176.392)*deg2rad;   % Target longitude [deg]
+phi_t   = -10.745*deg2rad; %(-4.887)*deg2rad;    % Target latitude [deg]
 V_t     = 475;      % Final velocity [m/s]
 h_t     = 600;     % Final altitude [m]
 rt = (h_t+Mars_radius);
@@ -77,10 +77,11 @@ sigma_max_allowed = 120*deg2rad;  % [rad] example max |sigma| 90º deegres with 
 sigma_max_rate = 20; %deg/s
 sigma_max_rate_accel = 5; %deg/s^2
 
+%% Logistic work
 %Logistic Variables
 sigma_logistic_0 = 40*deg2rad;
-K_logistic = 1.578;
-
+%K_logistic = 1.578;
+K_logistic = 0.944;
 %% Entry Vehicle Aerodynamic Properties
 mass = 2804; % Mass [kg]
 S_ref = 15.9; % Reference area m^2

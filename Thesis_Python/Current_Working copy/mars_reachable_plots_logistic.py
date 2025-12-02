@@ -51,7 +51,7 @@ class Vehicle:
 @dataclass
 class PathConstraints:
     """Path constraints for the reentry vehicle (g-load, dynamic pressure, heat rate)."""
-    A_max: float = 6.0        # [g] maximum total acceleration
+    A_max: float = 15.0        # [g] maximum total acceleration
     q_max: float = 13e3       # [Pa] maximum dynamic pressure
     Qdot_max: float = 500e3   # [W/m^2] maximum heat rate
 
@@ -298,7 +298,7 @@ def build_reachable_set(lat0, lon0,
     h0 = 125e3
     r0 = mars.radius + h0
     V0 = 5000.0
-    gam0 = np.deg2rad(-12.0)
+    gam0 = np.deg2rad(-15.5)
     psi0 = np.deg2rad(-2.8758)
 
     state0 = np.array([r0, lon0, lat0, V0, gam0, psi0])
@@ -342,8 +342,8 @@ if __name__ == "__main__":
 
     # Sweep control parameters: sigma0 in range [-120°, +120°] and K in [0.1, 2.0]
     # Coarse mesh for speed (100 x 100 = 10000 simulations)
-    sigma0_grid = np.linspace(np.deg2rad(-120), np.deg2rad(120), 100)
-    K_grid = np.linspace(0.1, 2.0, 100)
+    sigma0_grid = np.linspace(np.deg2rad(-120), np.deg2rad(120), 10)
+    K_grid = np.linspace(0.1, 2.0, 10)
 
     print(f"Building reachable set with {len(sigma0_grid)} x {len(K_grid)} = {len(sigma0_grid)*len(K_grid)} control parameter combinations")
     print(f"sigma0 range: [{np.degrees(sigma0_grid[0]):.1f}°, {np.degrees(sigma0_grid[-1]):.1f}°]")
@@ -605,7 +605,7 @@ if __name__ == "__main__":
             h0 = 125e3
             r0 = mars.radius + h0
             V0 = 5000.0
-            gam0 = np.deg2rad(-12.0)
+            gam0 = np.deg2rad(-15.5)
             psi0 = np.deg2rad(-2.8758)
             state0 = np.array([r0, lon0, lat0, V0, gam0, psi0])
             
