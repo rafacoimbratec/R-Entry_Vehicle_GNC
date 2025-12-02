@@ -152,25 +152,25 @@ N_SEGMENTS = 150   # Number of collocation segments
 
 # Entry interface conditions (atmospheric entry point)
 deg = np.deg2rad   # Convenience function for degree to radian conversion
-h0   = 125e3       # [m] Entry altitude (125 km)
+h0   = 128e3       # [m] Entry altitude (128 km)
 r0   = mars.radius + h0  # [m] Entry radius from Mars center
-V0   = 5000.0      # [m/s] Entry velocity
-gam0 = deg(-12.0)  # [rad] Entry flight path angle (negative = descending)
-psi0 = deg(-2.8758) # [rad] Entry heading angle
-lat0 = deg(-21.5)  # [rad] Entry latitude
-lon0 = deg(-176.40167)   # [rad] Entry longitude
+V0   = 5500.0      # [m/s] Entry velocity
+gam0 = deg(-15.5)  # [rad] Entry flight path angle (negative = descending)
+psi0 = deg(90) # [rad] Entry heading angle
+lat0 = deg(20.83)  # [rad] Entry latitude
+lon0 = deg(66.8)   # [rad] Entry longitude
 
 # Target landing site (for reference/plotting only)
-lat_target = lat0 + deg(15)   # [rad] Target latitude
-lon_target = lon0 - deg(0.2)  # [rad] Target longitude
+lat_target = deg(21.0329)  # [rad] Target latitude
+lon_target = deg(77.2821)  # [rad] Target longitude
 
 # Initial state vector: [r, lon, lat, V, gamma, psi]
 state0 = np.array([r0, lon0, lat0, V0, gam0, psi0])
 
 # Control (bank angle) limits
 # 10% margin from ±90° to avoid saturation: ±81°
-SIGMA_MIN = deg(-81.0)     # [rad] Minimum bank angle (with 10% margin)
-SIGMA_MAX = deg(81.0)      # [rad] Maximum bank angle (with 10% margin)
+SIGMA_MIN = deg(-120.0)     # [rad] Minimum bank angle (with 10% margin)
+SIGMA_MAX = deg(120.0)      # [rad] Maximum bank angle (with 10% margin)
 SIGMA_DOT_MAX = deg(20.0)  # [rad/s] Maximum bank angle rate
 SIGMA_DOT_MIN = -deg(20.0) # [rad/s] Minimum bank angle rate
 SIGMA_DOT_DOT_MAX = deg(5.0)  # [rad/s²]

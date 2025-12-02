@@ -41,11 +41,11 @@ class MarsEnv:
 
 
 class Vehicle:
-    L_over_D = 0.24
-    beta = 135.0            # ballistic coefficient as used in your eom
+    L_over_D = 0.2483
+    beta = 121.6            # ballistic coefficient as used in your eom
     N = 0.5                 # Sutton-Graves exponent on density
     M = 3.0                 # Sutton-Graves exponent on velocity
-    k_heat_flux = 5.3697e-5 # Sutton-Graves coefficient
+    k_heat_flux = 2.336276498787735e-4 # Sutton-Graves coefficient
 
 
 @dataclass
@@ -282,10 +282,10 @@ def build_reachable_set(lat0, lon0, lat_grid, lon_grid,
     all_samples = []
 
     # Fixed entry conditions
-    h0 = 125e3
+    h0 = 128e3
     r0 = mars.radius + h0
-    V0 = 4700.0
-    gam0 = np.deg2rad(-12.0)
+    V0 = 5500.0
+    gam0 = np.deg2rad(-15.5)
     psi0 = np.deg2rad(-2.8758)
 
     for lat_t in lat_grid:
@@ -333,8 +333,8 @@ def build_reachable_set(lat0, lon0, lat_grid, lon_grid,
 # ============================================================
 if __name__ == "__main__":
     deg2rad = np.pi/180
-    lat0 = -21.3 * deg2rad
-    lon0 = -176.40167 * deg2rad
+    lat0 = 20.83 * deg2rad
+    lon0 = 66.8 * deg2rad
 
     # sweep ±30° latitude, ±2° longitude
     lat_grid = np.linspace(lat0 - 30*deg2rad, lat0 + 30*deg2rad, 10)

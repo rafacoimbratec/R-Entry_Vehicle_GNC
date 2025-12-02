@@ -51,9 +51,9 @@ class Vehicle:
 @dataclass
 class PathConstraints:
     """Path constraints for the reentry vehicle (g-load, dynamic pressure, heat rate)."""
-    A_max: float = 15.0        # [g] maximum total acceleration
+    A_max: float = 12.0        # [g] maximum total acceleration
     q_max: float = 13e3       # [Pa] maximum dynamic pressure
-    Qdot_max: float = 600e3   # [W/m^2] maximum heat rate
+    Qdot_max: float = 700e3   # [W/m^2] maximum heat rate
 
 
 mars = MarsEnv()
@@ -287,11 +287,11 @@ def build_reachable_set(lat0, lon0,
     all_samples = []
 
     # Fixed entry conditions
-    h0 = 125e3
+    h0 = 128e3
     r0 = mars.radius + h0
-    V0 = 5000.0
-    gam0 = np.deg2rad(-12.0)
-    psi0 = np.deg2rad(-2.8758)
+    V0 = 5500.0
+    gam0 = np.deg2rad(-15.5)
+    psi0 = np.deg2rad(90.0)
 
     state0 = np.array([r0, lon0, lat0, V0, gam0, psi0])
 
@@ -330,8 +330,8 @@ def build_reachable_set(lat0, lon0,
 # ============================================================
 if __name__ == "__main__":
     deg2rad = np.pi/180
-    lat0 = -21.3 * deg2rad
-    lon0 = -176.40167 * deg2rad
+    lat0 = 20.83 * deg2rad
+    lon0 = 66.8 * deg2rad
 
     # Sweep control parameters: sigma1 and sigma2 in range [-81°, +81°]
     # Coarse mesh for speed (10x10 = 100 simulations)
@@ -508,8 +508,8 @@ if __name__ == "__main__":
         
         # Apply constraints to filter valid targets
         valid_mask = (
-            (np.abs(RC_all) < 10.0) &          # Crossrange < 10 km
-            (A_all < 15.0) &                    # Acceleration < 15 g
+            (np.abs(RD_all) < 10.0) &          # Crossrange < 10 km
+            (A_all < 12.0) &                    # Acceleration < 15 g
             (q_all <= constraints.q_max) &     # Dynamic pressure within limit
             (Qdot_all <= constraints.Qdot_max) # Heat rate within limit
         )
@@ -595,11 +595,11 @@ if __name__ == "__main__":
             print("SIMULATING BEST TRAJECTORY")
             print("="*80)
             
-            h0 = 125e3
+            h0 = 128e3
             r0 = mars.radius + h0
-            V0 = 5000.0
-            gam0 = np.deg2rad(-12.0)
-            psi0 = np.deg2rad(-2.8758)
+            V0 = 5500.0
+            gam0 = np.deg2rad(-15.5)
+            psi0 = np.deg2rad(90.0)
             state0 = np.array([r0, lon0, lat0, V0, gam0, psi0])
             
             # First pass: estimate trajectory duration

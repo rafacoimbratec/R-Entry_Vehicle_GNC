@@ -51,9 +51,9 @@ class Vehicle:
 @dataclass
 class PathConstraints:
     """Path constraints for the reentry vehicle (g-load, dynamic pressure, heat rate)."""
-    A_max: float = 15.0        # [g] maximum total acceleration
+    A_max: float = 12.0        # [g] maximum total acceleration
     q_max: float = 13e3       # [Pa] maximum dynamic pressure
-    Qdot_max: float = 500e3   # [W/m^2] maximum heat rate
+    Qdot_max: float = 700e3   # [W/m^2] maximum heat rate
 
 
 mars = MarsEnv()
@@ -194,7 +194,7 @@ def deploy_trigger(h, V, q):
     a_safe = max(a, 1e-6)
     mach = V / a_safe
 
-    return ((1.4 <= mach <= 2.2) and (300.0 <= q <= 800.0) or (h <= 6000.0))
+    return ((1.5 <= mach <= 2.5) and (300.0 <= q <= 800.0) or (h <= 6000.0))
 
 # ============================================================
 # Safe simulation with logistic bank profile
@@ -295,11 +295,11 @@ def build_reachable_set(lat0, lon0,
     all_samples = []
 
     # Fixed entry conditions
-    h0 = 125e3
+    h0 = 128e3
     r0 = mars.radius + h0
-    V0 = 5000.0
+    V0 = 5500.0
     gam0 = np.deg2rad(-15.5)
-    psi0 = np.deg2rad(-2.8758)
+    psi0 = np.deg2rad(90.0)
 
     state0 = np.array([r0, lon0, lat0, V0, gam0, psi0])
 
@@ -337,13 +337,13 @@ def build_reachable_set(lat0, lon0,
 # ============================================================
 if __name__ == "__main__":
     deg2rad = np.pi/180
-    lat0 = -21.3 * deg2rad
-    lon0 = -176.40167 * deg2rad
+    lat0 = 20.83 * deg2rad
+    lon0 = 66.8 * deg2rad
 
     # Sweep control parameters: sigma0 in range [-120°, +120°] and K in [0.1, 2.0]
     # Coarse mesh for speed (100 x 100 = 10000 simulations)
-    sigma0_grid = np.linspace(np.deg2rad(-120), np.deg2rad(120), 10)
-    K_grid = np.linspace(0.1, 2.0, 10)
+    sigma0_grid = np.linspace(np.deg2rad(-120), np.deg2rad(120), 20)
+    K_grid = np.linspace(0.1, 3.0, 20)
 
     print(f"Building reachable set with {len(sigma0_grid)} x {len(K_grid)} = {len(sigma0_grid)*len(K_grid)} control parameter combinations")
     print(f"sigma0 range: [{np.degrees(sigma0_grid[0]):.1f}°, {np.degrees(sigma0_grid[-1]):.1f}°]")
@@ -381,7 +381,8 @@ if __name__ == "__main__":
             lat_f = np.deg2rad(lat_all[i])
             lon_f = np.deg2rad(lon_all[i])
             # Compute metrics relative to reference direction
-            d_m, sin_d, cos_d, RC, RD, RD_go, Rgo = spherical_metrics(
+            # Note: spherical_metrics outputs are swapped (RC is actually downrange, RD is crossrange)
+            d_m, sin_d, cos_d, RD, RC, RD_go, Rgo = spherical_metrics(
                 lat0, lon0, lat_f, lon_f, lat_ref, lon_ref, mars.radius
             )
             RD_all.append(RD / 1e3)  # Convert to km
@@ -513,10 +514,10 @@ if __name__ == "__main__":
         print("TARGET SELECTION")
         print("="*80)
         
-        # Apply constraints to filter valid targets
+            # Apply constraints to filter valid targets
         valid_mask = (
             (np.abs(RC_all) < 10.0) &          # Crossrange < 10 km
-            (A_all < 15.0) &                    # Acceleration < 15 g
+            (A_all < 12.0) &                    # Acceleration < 15 g
             (q_all <= constraints.q_max) &     # Dynamic pressure within limit
             (Qdot_all <= constraints.Qdot_max) # Heat rate within limit
         )
@@ -602,11 +603,11 @@ if __name__ == "__main__":
             print("SIMULATING BEST TRAJECTORY")
             print("="*80)
             
-            h0 = 125e3
+            h0 = 128e3
             r0 = mars.radius + h0
-            V0 = 5000.0
+            V0 = 5500.0
             gam0 = np.deg2rad(-15.5)
-            psi0 = np.deg2rad(-2.8758)
+            psi0 = np.deg2rad(90.0)
             state0 = np.array([r0, lon0, lat0, V0, gam0, psi0])
             
             # Compute initial and final energies

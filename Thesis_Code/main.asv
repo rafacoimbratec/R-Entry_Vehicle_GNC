@@ -44,15 +44,15 @@ stepTime = 0.01;  % Time step of simulation [s]
 %% Initial Conditions
 h0  = 128e3;        % Initial altitude [m]
 r0 = (h0+Mars_radius);
-theta0 = 66.8*deg2rad; % Initial longitude [deg]
-phi0   = (20.83)*deg2rad;      % Initial latitude [deg]
+theta0 = -176.40167*deg2rad; % Initial longitude [deg]
+phi0   = (2)*deg2rad;      % Initial latitude [deg]
 V0  = 5500;          % Initial velocity [m/s]
 gamma0 = (-15.5)*deg2rad;        % Initial flight path angle [deg]
 psi0   = (90)*deg2rad;    % Initial heading angle [deg]
 e_0 = Mars_mu / r0 - 0.5 * V0^2;
 %% Final Conditions Mars reachable plots
-theta_t = 77.2821*deg2rad; %-176.341*deg2rad;%(-176.392)*deg2rad;   % Target longitude [deg]
-phi_t   = 21.0329*deg2rad;%-10.745*deg2rad; %(-4.887)*deg2rad;    % Target latitude [deg]
+theta_t = 21.0329*deg2rad; %-176.341*deg2rad;%(-176.392)*deg2rad;   % Target longitude [deg]
+phi_t   = 77.2821*deg2rad;%-10.745*deg2rad; %(-4.887)*deg2rad;    % Target latitude [deg]
 V_t     = 475;      % Final velocity [m/s]
 h_t     = 600;     % Final altitude [m]
 rt = (h_t+Mars_radius);
