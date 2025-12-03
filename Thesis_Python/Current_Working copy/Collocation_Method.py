@@ -39,7 +39,10 @@ class Mars:
 @dataclass
 class Vehicle:
     beta: float = 121.6                 # ballistic coefficient [kg/m^2]
-    L_over_D: float = 0.2483              # lift-to-drag
+    L_over_D: float = 0.2483            # lift-to-drag
+    N: float = 0.5                      # Sutton-Graves exponent on density
+    M: float = 3.0                      # Sutton-Graves exponent on velocity
+    k_heat_flux: float = 2.336276498787735e-4  # Sutton-Graves coefficient
 
 mars = Mars()
 veh  = Vehicle()
@@ -176,6 +179,11 @@ SIGMA_DOT_MIN = -deg(20.0) # [rad/s] Minimum bank angle rate
 SIGMA_DOT_DOT_MAX = deg(5.0)  # [rad/s²]
 SIGMA_DOT_DOT_MIN = -deg(5.0)
                            # Limits how fast vehicle can roll
+
+# Path constraint limits (for plotting and comparison)
+Q_MAX_CONSTRAINT = 13000.0  # [Pa] Maximum dynamic pressure constraint
+A_MAX_CONSTRAINT = 12.0     # [g] Maximum acceleration constraint
+QDOT_MAX_CONSTRAINT = 700e3 # [W/m²] Maximum heat rate constraint
 
 # Objective function weights
 # Maximize altitude while minimizing gamma^2 for control authority
@@ -592,6 +600,8 @@ def solve_collocation(lat_target_in=None, lon_target_in=None):
     # These are computed from the state trajectory
     hist["rho"] = []     # Atmospheric density [kg/m³]
     hist["q"] = []       # Dynamic pressure [Pa]
+    hist["A"] = []       # Total acceleration [g]
+    hist["Qdot"] = []    # Heat rate [W/m²]
     hist["mach"] = []    # Mach number [-]
     hist["Rgo"] = []     # Range-to-go [km]
     hist["RC"] = []      # Crossrange [km]
@@ -613,6 +623,17 @@ def solve_collocation(lat_target_in=None, lon_target_in=None):
         # Dynamic pressure: q = 0.5 * ρ * V²
         q_i = 0.5 * rho_i * V_i**2
         
+        # Aerodynamic forces
+        D_i = 0.5 * rho_i * V_i**2 / veh.beta
+        L_i = veh.L_over_D * D_i
+        
+        # Total acceleration in g's
+        g0 = 9.80665
+        A_i = np.sqrt(D_i**2 + L_i**2) / g0
+        
+        # Heat rate (Sutton-Graves)
+        Qdot_i = veh.k_heat_flux * (rho_i**veh.N) * (V_i**veh.M)
+        
         # Mach number: M = V / a (speed of sound)
         h_km_i = h_i / 1e3
         T_i = 1.4e-13 * h_km_i**3 - 8.85e-9 * h_km_i**2 - 1.245e-3 * h_km_i + 205.36  # Temperature
@@ -630,6 +651,8 @@ def solve_collocation(lat_target_in=None, lon_target_in=None):
         # Append to lists (will convert to arrays after loop)
         hist["rho"].append(rho_i)
         hist["q"].append(q_i)
+        hist["A"].append(A_i)
+        hist["Qdot"].append(Qdot_i)
         hist["mach"].append(mach_i)
         hist["Rgo"].append(Rgo_i / 1e3)    # Convert to km
         hist["RC"].append(RC_i / 1e3)      # Convert to km
@@ -637,7 +660,7 @@ def solve_collocation(lat_target_in=None, lon_target_in=None):
         hist["RD_go"].append(RD_go_i / 1e3)  # Convert to km
     
     # Convert lists to numpy arrays for easier manipulation
-    for key in ["rho", "q", "mach", "Rgo", "RC", "RD", "RD_go"]:
+    for key in ["rho", "q", "A", "Qdot", "mach", "Rgo", "RC", "RD", "RD_go"]:
         hist[key] = np.array(hist[key])
     
     # ===== COMPUTE ENERGY HISTORY =====
@@ -1193,6 +1216,29 @@ def plot_results(sol, hist):
         lat_sim = states_sim[:, 2]
         lon_sim = states_sim[:, 1]
         
+        # Compute path constraints along simulation trajectory
+        q_sim = np.zeros(len(t_sim))
+        A_sim = np.zeros(len(t_sim))
+        Qdot_sim = np.zeros(len(t_sim))
+        
+        for i in range(len(t_sim)):
+            r_i = states_sim[i, 0]
+            V_i = states_sim[i, 3]
+            h_i = r_i - mars.radius
+            rho_i = mars.rho0 * np.exp(-h_i / mars.Hs)
+            
+            # Dynamic pressure
+            q_sim[i] = 0.5 * rho_i * V_i**2
+            
+            # Acceleration (total g-load)
+            D_i = 0.5 * rho_i * V_i**2 / veh.beta
+            L_i = veh.L_over_D * D_i
+            g0 = 9.80665
+            A_sim[i] = np.sqrt(D_i**2 + L_i**2) / g0
+            
+            # Heat rate (Sutton-Graves)
+            Qdot_sim[i] = veh.k_heat_flux * (rho_i**veh.N) * (V_i**veh.M)
+        
         # Compute final metrics
         r_f_sim = states_sim[-1, 0]
         V_f_sim = states_sim[-1, 3]
@@ -1373,6 +1419,77 @@ def plot_results(sol, hist):
         axes_comp[5].set_title('Ground Track')
         axes_comp[5].legend()
         axes_comp[5].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        # Create path constraints comparison plot
+        fig6 = plt.figure(figsize=(14, 10))
+        fig6.suptitle('Path Constraints Comparison: Collocation vs Logistic Simulation', 
+                     fontsize=14, fontweight='bold')
+        
+        axes_constr = []
+        for i in range(6):
+            axes_constr.append(plt.subplot(2, 3, i+1))
+        
+        # Dynamic pressure
+        axes_constr[0].plot(hist["t"], hist["q"]/1e3, 'b-', lw=2.5, label='Collocation')
+        axes_constr[0].plot(t_sim, q_sim/1e3, 'r--', lw=2, label='Logistic Sim')
+        axes_constr[0].axhline(Q_MAX_CONSTRAINT/1e3, ls=':', color='k', lw=1.5, label='Limit')
+        axes_constr[0].set_xlabel('Time [s]')
+        axes_constr[0].set_ylabel('q [kPa]')
+        axes_constr[0].set_title(f'Dynamic Pressure (max_col={hist["q"].max()/1e3:.2f}, max_sim={q_sim.max()/1e3:.2f} kPa)')
+        axes_constr[0].legend(fontsize=9)
+        axes_constr[0].grid(True, alpha=0.3)
+        
+        # Acceleration
+        axes_constr[1].plot(hist["t"], hist["A"], 'b-', lw=2.5, label='Collocation')
+        axes_constr[1].plot(t_sim, A_sim, 'r--', lw=2, label='Logistic Sim')
+        axes_constr[1].axhline(A_MAX_CONSTRAINT, ls=':', color='k', lw=1.5, label='Limit')
+        axes_constr[1].set_xlabel('Time [s]')
+        axes_constr[1].set_ylabel('A [g]')
+        axes_constr[1].set_title(f'Acceleration (max_col={hist["A"].max():.2f}, max_sim={A_sim.max():.2f} g)')
+        axes_constr[1].legend(fontsize=9)
+        axes_constr[1].grid(True, alpha=0.3)
+        
+        # Heat rate
+        axes_constr[2].plot(hist["t"], hist["Qdot"]/1e3, 'b-', lw=2.5, label='Collocation')
+        axes_constr[2].plot(t_sim, Qdot_sim/1e3, 'r--', lw=2, label='Logistic Sim')
+        axes_constr[2].axhline(QDOT_MAX_CONSTRAINT/1e3, ls=':', color='k', lw=1.5, label='Limit')
+        axes_constr[2].set_xlabel('Time [s]')
+        axes_constr[2].set_ylabel('Q̇ [kW/m²]')
+        axes_constr[2].set_title(f'Heat Rate (max_col={hist["Qdot"].max()/1e3:.1f}, max_sim={Qdot_sim.max()/1e3:.1f} kW/m²)')
+        axes_constr[2].legend(fontsize=9)
+        axes_constr[2].grid(True, alpha=0.3)
+        
+        # Dynamic pressure vs altitude
+        axes_constr[3].plot(hist["q"]/1e3, hist["h"], 'b-', lw=2.5, label='Collocation')
+        axes_constr[3].plot(q_sim/1e3, h_sim, 'r--', lw=2, label='Logistic Sim')
+        axes_constr[3].axvline(Q_MAX_CONSTRAINT/1e3, ls=':', color='k', lw=1.5, label='Limit')
+        axes_constr[3].set_xlabel('q [kPa]')
+        axes_constr[3].set_ylabel('Altitude [km]')
+        axes_constr[3].set_title('Dynamic Pressure vs Altitude')
+        axes_constr[3].legend(fontsize=9)
+        axes_constr[3].grid(True, alpha=0.3)
+        
+        # Acceleration vs altitude
+        axes_constr[4].plot(hist["A"], hist["h"], 'b-', lw=2.5, label='Collocation')
+        axes_constr[4].plot(A_sim, h_sim, 'r--', lw=2, label='Logistic Sim')
+        axes_constr[4].axvline(A_MAX_CONSTRAINT, ls=':', color='k', lw=1.5, label='Limit')
+        axes_constr[4].set_xlabel('A [g]')
+        axes_constr[4].set_ylabel('Altitude [km]')
+        axes_constr[4].set_title('Acceleration vs Altitude')
+        axes_constr[4].legend(fontsize=9)
+        axes_constr[4].grid(True, alpha=0.3)
+        
+        # Heat rate vs altitude
+        axes_constr[5].plot(hist["Qdot"]/1e3, hist["h"], 'b-', lw=2.5, label='Collocation')
+        axes_constr[5].plot(Qdot_sim/1e3, h_sim, 'r--', lw=2, label='Logistic Sim')
+        axes_constr[5].axvline(QDOT_MAX_CONSTRAINT/1e3, ls=':', color='k', lw=1.5, label='Limit')
+        axes_constr[5].set_xlabel('Q̇ [kW/m²]')
+        axes_constr[5].set_ylabel('Altitude [km]')
+        axes_constr[5].set_title('Heat Rate vs Altitude')
+        axes_constr[5].legend(fontsize=9)
+        axes_constr[5].grid(True, alpha=0.3)
         
         plt.tight_layout()
         plt.show()

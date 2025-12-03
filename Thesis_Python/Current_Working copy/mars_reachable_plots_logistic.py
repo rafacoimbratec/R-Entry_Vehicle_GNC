@@ -516,7 +516,7 @@ if __name__ == "__main__":
         
             # Apply constraints to filter valid targets
         valid_mask = (
-            (np.abs(RC_all) < 10.0) &          # Crossrange < 10 km
+            (np.abs(RC_all) < 20.0) &          # Crossrange < 10 km
             (A_all < 12.0) &                    # Acceleration < 15 g
             (q_all <= constraints.q_max) &     # Dynamic pressure within limit
             (Qdot_all <= constraints.Qdot_max) # Heat rate within limit
@@ -553,11 +553,11 @@ if __name__ == "__main__":
             # - Minimize heat load
             # - Minimize crossrange
             # - Minimize flight path angle magnitude
-            w_alt = 0.4      # Weight for altitude (higher is better)
-            w_A = 0.05       # Weight for acceleration (lower is better)
-            w_Qdot = 0.1     # Weight for heat rate (lower is better)
-            w_RC = 0.15      # Weight for crossrange (lower is better)
-            w_gam = 0.3      # Weight for flight path angle (lower is better)
+            w_alt = 0.05      # Weight for altitude (higher is better)
+            w_A = 0.02       # Weight for acceleration (lower is better)
+            w_Qdot = 0.03     # Weight for heat rate (lower is better)
+            w_RC = 0.0       # Weight for crossrange (lower is better)
+            w_gam = 0.9      # Weight for flight path angle (lower is better)
             
             cost = -w_alt * ALT_norm + w_A * A_norm + w_Qdot * Qdot_norm + w_RC * RC_norm + w_gam * gam_norm
             
