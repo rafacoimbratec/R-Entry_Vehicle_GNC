@@ -126,7 +126,7 @@ fprintf('Initial Range-to-Go: %.2f km\n', Rgo/1000);
 
 %% Initial Bank Angle Guess and Final Bank Angle
 sigma0_guess_deg = 100;        % Initial guess for bank angle [deg]
-sigma_f_deg      = 10;          % Final bank angle at target [deg]
+sigma_f_deg      = 40;          % Final bank angle at target [deg]
 
 % Convert to radians for MATLAB/Simulink
 sigma0_guess = sigma0_guess_deg * deg2rad;
