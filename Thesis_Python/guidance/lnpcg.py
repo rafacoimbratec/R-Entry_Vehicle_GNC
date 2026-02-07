@@ -74,8 +74,6 @@ class LNPCGuidance(BaseGuidance):
         if t <= self.activation_time:
             #print(f"LNPCG inactive at t={t:.1f}s, using zero bank")
             return 0.0
-        initial_phi = np.deg2rad(-21.3)
-        initial_theta = np.deg2rad(-176.40167)
         
         # Get required objects from kwargs
         atmosphere = kwargs.get('atmosphere')
@@ -91,9 +89,8 @@ class LNPCGuidance(BaseGuidance):
         # Compute range-to-go using spherical metrics
         from spherical_metrics import spherical_metrics
         d, sin_d, cos_d, RC, RD, RD_go, Rgo = spherical_metrics(
-           initial_phi, initial_theta, state.phi, state.theta, 
+           np.deg2rad(-21.3), np.deg2rad(-176.40167), state.phi, state.theta, 
             target.phi, target.theta, mars_radius)
-        
         s_target = Rgo  # Total range-to-go [m]
         #print(f"LNPCG at t={t:.1f}s: e_current={e_current:.1f} J/kg, s_target={s_target:.1f} m", f"sigma={np.rad2deg(self.sigma_prev):.2f}°")
 
@@ -216,10 +213,15 @@ class LNPCGuidance(BaseGuidance):
         while e < self.e_f:
             # Adaptive energy step: reduce near terminal energy for accuracy
             e_remaining = self.e_f - e
+<<<<<<< HEAD
             if e_remaining < 100000:  # Start reducing in last 100 kJ/kg
                 # Smoothly transition from self.de down to 100 J/kg
                 # This gives finer resolution as we approach terminal energy
                 de_step = max(100.0, min(self.de, e_remaining / 20))
+=======
+            if e_remaining < 500000:  # Last 500 kJ/kg
+                de_step = min(self.de, max(100.0, e_remaining / 10))
+>>>>>>> parent of a3f172f (Finally implemented LNPCG)
             else:
                 de_step = self.de
             

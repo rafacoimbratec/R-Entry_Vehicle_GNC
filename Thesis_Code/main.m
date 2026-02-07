@@ -109,4 +109,19 @@ lon0   = -176.40167 * deg2rad;
 %[d, sin_d, cos_d, RC, RD, RD_go, Rgo] = spherical_metrics(lat0, lon0, lat0, lon0, lat_t, lon_t, Mars_radius);
 
 % Range-to-go is simply great-circle distance to target (d)
+<<<<<<< HEAD
 %fprintf('Initial Range-to-Go: %.2f km\n', Rgo/1000);
+=======
+fprintf('Initial Range-to-Go: %.2f km\n', Rgo/1000);
+
+%% Initial Bank Angle Guess and Final Bank Angle
+sigma0_guess_deg = 100;        % Initial guess for bank angle [deg]
+sigma_f_deg      = 10;          % Final bank angle at target [deg]
+
+% Convert to radians for MATLAB/Simulink
+sigma0_guess = sigma0_guess_deg * deg2rad;
+sigma_f      = sigma_f_deg * deg2rad;
+
+fprintf('Initial Bank Guess: %.2f deg, Final Bank: %.2f deg\n', ...
+    sigma0_guess_deg, sigma_f_deg);
+>>>>>>> parent of a3f172f (Finally implemented LNPCG)
