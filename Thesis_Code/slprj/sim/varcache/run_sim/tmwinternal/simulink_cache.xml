@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <MF0 version="1.1" packageUris="http://schema.mathworks.com/mf0/SlCache/19700101">
+<<<<<<< HEAD
   <slcache.FileAttributes type="slcache.FileAttributes" uuid="9775190e-2198-4146-8119-35870d14e8c2">
     <checksum>dYAvACSVXVo1aINkHPpPVG/SkFllInVY8pfx44zLW/jn8HKBpy9Z2+hPiKKIJfaRBtCvhStzN1WzsUn59eUBbA==</checksum>
+=======
+  <slcache.FileAttributes type="slcache.FileAttributes" uuid="a619e943-211b-47df-a6c0-020063e0d856">
+    <checksum>Zh9PNYW/tB3CZIYs5vAgYmmP2qfUNxoJklaq/gifXCJ4EQTyXCkTWcgQc+xBOfOUeA7P3mOCyR0LWL5U88IlKw==</checksum>
+>>>>>>> parent of a4c5db4 (LNPCG implementation)
   </slcache.FileAttributes>
 </MF0>

@@ -1,8 +1,12 @@
 %% Planet Constants - Mars
+<<<<<<< HEAD
 clear; clc; close all;
 format long;
 
 %Check Benito Reference
+=======
+
+>>>>>>> parent of a4c5db4 (LNPCG implementation)
 % === Mars Radius ===
 Mars_radius = 3396.2e3;  % [m]
 
@@ -56,10 +60,15 @@ phi_t   = 21.0329*deg2rad;%-10.745*deg2rad; %(-4.887)*deg2rad;    % Target latit
 V_t     = 475;      % Final velocity [m/s]
 h_t     = 600;     % Final altitude [m]
 rt = (h_t+Mars_radius);
+<<<<<<< HEAD
 e_t = Mars_mu / rt - 0.5 * V_t^2;
 %% Parachute deployment constraints
 % Targeting accuracy (within 5 km of target on the surface)
 Rgo_max = 5e3;        % [m] max allowed range-to-go at deploy
+=======
+%% Targeting Accuracy Requirement
+Rgo_target = 5e3;  % Maximum allowable targeting error [m] (5 km)
+>>>>>>> parent of a4c5db4 (LNPCG implementation)
 
 % Mach window for safe deployment (placeholder values – tune as needed)
 M_min   = 1.5;        % [-] minimum Mach for chute deployment
@@ -113,6 +122,7 @@ lon0   = -176.40167 * deg2rad;
 %fprintf('Initial Range-to-Go: %.2f km\n', Rgo/1000);
 =======
 fprintf('Initial Range-to-Go: %.2f km\n', Rgo/1000);
+<<<<<<< HEAD
 
 %% Initial Bank Angle Guess and Final Bank Angle
 sigma0_guess_deg = 100;        % Initial guess for bank angle [deg]
@@ -125,3 +135,5 @@ sigma_f      = sigma_f_deg * deg2rad;
 fprintf('Initial Bank Guess: %.2f deg, Final Bank: %.2f deg\n', ...
     sigma0_guess_deg, sigma_f_deg);
 >>>>>>> parent of a3f172f (Finally implemented LNPCG)
+=======
+>>>>>>> parent of a4c5db4 (LNPCG implementation)
